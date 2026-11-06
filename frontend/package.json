@@ -22,7 +22,7 @@
     "next": "15.5.29",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-dropzone": "^14.2.3",
+    "react-dropzone": "^20.1.4",
     "recharts": "^2.13.3",
     "tailwind-merge": "^2.5.4",
     "tailwindcss-animate": "^1.0.7",
