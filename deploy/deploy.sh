@@ -77,7 +77,7 @@ env_set() { # KEY VALUE -> replace or append in .env (keeps file mode)
 svc_container() { # compose service -> container id
   podman ps -q \
     --filter "label=io.podman.compose.project=$COMPOSE_PROJECT_NAME" \
-    --filter "label=com.docker.compose.service=$1" | head -n1
+    --filter "label=com.docker.compose.service=$1" | awk 'NR==1'  # not head: SIGPIPE + pipefail
 }
 
 state_get() { [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1" || true; }

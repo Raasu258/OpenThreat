@@ -48,7 +48,7 @@ GHCR). Every running image corresponds to exactly one commit.
 | What | How |
 |---|---|
 | Ship a change | merge/push to `main` → CI → live within ~10 min after CI is green |
-| Dependabot update | review + merge the PR (CI must be green) |
+| Dependabot update | patch/minor: merged automatically once CI is green, then deployed. Major: labelled `dependabot:manual-review` - review and merge by hand. Opt a PR out with the label `no-automerge` |
 | What's running | `deploy/deploy.sh --status` |
 | Deploy now | `systemctl --user start openthreat-deploy.service` |
 | Logs | `journalctl --user -u openthreat-deploy.service -f` |
