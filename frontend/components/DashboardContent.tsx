@@ -8,7 +8,7 @@ import { AlertTriangle, Shield, Clock, Calendar, Filter, X, Search, ChevronLeft,
 import Link from "next/link";
 import { formatDate, getSeverityBadgeColor, getSeverityAccentColor } from "@/lib/utils";
 
-const CLIENT_API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8001';
+const CLIENT_API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 // In-memory cache with timestamps
 const cache = new Map<string, { data: any; timestamp: number }>();
