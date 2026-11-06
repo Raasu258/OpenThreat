@@ -3,6 +3,9 @@
 # images (nginx, frontend, backend, celery worker + beat, postgres, redis)
 # and checks the deployed behaviour through nginx, the way users see it.
 #
+# Note: no `cmd | grep -q` / `| head` pipes - with pipefail the early exit
+# SIGPIPEs the producer and turns a match into a failure.
+#
 # Env:
 #   OT_REGISTRY, OT_IMAGE_TAG   locally available images to test
 #   COMPOSE                     default "docker compose"
@@ -76,7 +79,8 @@ check "GET /api/v1/analytics/stats"       200 "$(code "$B/api/v1/analytics/stats
 check "GET /metrics blocked"              403 "$(code "$B/metrics")"
 check "GET tasks/workers/status anon"     "401|403" "$(code "$B/api/v1/tasks/workers/status")"
 
-asset="$(curl -sk "$B/" | grep -o '/_next/static/[^"]*\.js' | head -n1)"
+home_html="$(curl -sk "$B/")"
+asset="$(grep -o '/_next/static/[^"]*\.js' <<<"$home_html" | awk 'NR==1')"
 check "static asset served"               200 "$(code "$B${asset:-/_next/static/missing.js}")"
 
 hdrs="$(curl -sk -D - -o /dev/null "$B/")"
@@ -89,7 +93,8 @@ check "HTTP redirect keeps HTTPS port"    "https://localhost:$HTTPS_PORT/news\?x
 hardcoded=0
 for page in / /news /my-stack /site-stats; do
   for js in $(curl -sk "$B$page" | grep -o '/_next/static/[^"]*\.js' | sort -u); do
-    if curl -sk "$B$js" | grep -qE '127\.0\.0\.1:8001|localhost:8000|open-threats\.'; then
+    body="$(curl -sk "$B$js")"
+    if grep -qE '127\.0\.0\.1:8001|localhost:8000|open-threats\.' <<<"$body"; then
       echo "      hard-coded host in $js"; hardcoded=$((hardcoded+1))
     fi
   done
@@ -98,7 +103,8 @@ check "no hard-coded API host in bundle"  0 "$hardcoded"
 
 pong=0
 for _ in $(seq 1 30); do
-  if $COMPOSE exec -T celery-worker celery -A backend.celery_app inspect ping 2>/dev/null | grep -q pong; then
+  out="$($COMPOSE exec -T celery-worker celery -A backend.celery_app inspect ping 2>&1 || true)"
+  if grep -q pong <<<"$out"; then
     pong=1; break
   fi
   sleep 3
