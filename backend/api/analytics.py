@@ -5,7 +5,7 @@ Site analytics endpoints for visitor statistics.
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import Date, cast, func
 from sqlalchemy.orm import Session
@@ -109,7 +109,9 @@ async def track_page_view(
 
 @router.get("/analytics/stats", response_model=AnalyticsResponse)
 async def get_analytics_stats(
-    days: int = 30,
+    # Public endpoint (used by /site-stats): bound the range so a single
+    # request can't trigger an arbitrarily large aggregation.
+    days: int = Query(30, ge=1, le=365),
     db: Session = Depends(get_db),
 ):
     """

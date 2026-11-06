@@ -1,0 +1,15 @@
+# One pull-and-deploy run (see deploy/deploy.sh). Triggered by
+# openthreat-deploy.timer; run by hand with:
+#   systemctl --user start openthreat-deploy.service
+# Logs:  journalctl --user -u openthreat-deploy.service
+[Unit]
+Description=OpenThreat pull-based deploy
+After=openthreat.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO_DIR@
+Environment=COMPOSE_PROJECT_NAME=openthreat
+ExecStart=@REPO_DIR@/deploy/deploy.sh
+TimeoutStartSec=30min
+Nice=10

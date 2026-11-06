@@ -32,7 +32,7 @@ import {
   importStacksFromFile,
 } from "@/lib/stacks-storage";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 const ECOSYSTEMS = ["npm", "pypi", "rubygems", "packagist", "maven", "go", "cargo"];
 

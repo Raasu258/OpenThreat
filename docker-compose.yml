@@ -1,13 +1,38 @@
+# OpenThreat production stack (rootless Podman + podman-compose on the VPS).
+#
+# Application images are built by GitHub Actions (.github/workflows/images.yml)
+# and pulled from GHCR; deploy/deploy.sh pins OT_IMAGE_TAG to the commit
+# being deployed. To build locally instead:
+#   podman build -t ghcr.io/<owner>/openthreat-backend:local -f Dockerfile.prod .
+#   podman build -t ghcr.io/<owner>/openthreat-frontend:local frontend -f frontend/Dockerfile.prod
+#   OT_IMAGE_TAG=local podman-compose up -d
+#
+# All settings come from .env (see .env.vps.example).
+
+x-backend-image: &backend-image ${OT_REGISTRY:-ghcr.io/raasu258}/openthreat-backend:${OT_IMAGE_TAG:-main}
+
+x-db-env: &db-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-openthreat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openthreat}
+  REDIS_URL: redis://redis:6379
+
 services:
   nginx:
-    image: nginx:alpine
+    image: docker.io/library/nginx:alpine
     ports:
-      - "80:80"
-      - "443:443"
+      - "${NGINX_HTTP_PORT:-8082}:80"
+      - "${NGINX_HTTPS_PORT:-8443}:443"
+    environment:
+      # nginx.conf is rendered from a template at start so the HTTP->HTTPS
+      # redirect knows the public port. Only NGINX_PUBLIC_* is substituted;
+      # nginx's own $host etc. are left alone.
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+      NGINX_ENVSUBST_FILTER: ^NGINX_PUBLIC_
+      NGINX_PUBLIC_HTTPS_PORT: ${NGINX_HTTPS_PORT:-8443}
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/cache:/var/cache/nginx
-      - ./nginx/ssl:/etc/nginx/ssl:ro
+      # :Z gives the files a private SELinux label for this container
+      - ./nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro,Z
+      - ./nginx/ssl:/etc/nginx/ssl:ro,Z
+      - nginx_cache:/var/cache/nginx
     depends_on:
       - frontend
       - backend
@@ -16,15 +41,12 @@ services:
       - openthreat-network
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.prod
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://open-threats.com}
+    image: ${OT_REGISTRY:-ghcr.io/raasu258}/openthreat-frontend:${OT_IMAGE_TAG:-main}
     environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://open-threats.com}
-      - API_URL=http://backend:8001
+      NODE_ENV: production
+      # Server-side rendering talks to the backend directly; the browser
+      # uses same-origin /api/... through nginx.
+      API_URL: http://backend:8001
     restart: unless-stopped
     networks:
       - openthreat-network
@@ -35,30 +57,27 @@ services:
           memory: 512M
 
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.prod
+    image: *backend-image
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-openthreat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openthreat}
-      - REDIS_URL=redis://redis:6379
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - ENVIRONMENT=${ENVIRONMENT:-production}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
-      - OLLAMA_HOST=${OLLAMA_HOST:-}
-      - SECRET_KEY=${SECRET_KEY}
-      - CSRF_SECRET_KEY=${CSRF_SECRET_KEY}
-      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
-      - SMTP_ENABLED=${SMTP_ENABLED:-false}
-      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_USERNAME=${SMTP_USERNAME}
-      - SMTP_PASSWORD=${SMTP_PASSWORD}
-      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL}
-      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-OpenThreat}
+      <<: *db-env
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      OLLAMA_HOST: ${OLLAMA_HOST:-}
+      SECRET_KEY: ${SECRET_KEY}
+      CSRF_SECRET_KEY: ${CSRF_SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-OpenThreat}
     depends_on:
       - postgres
       - redis
-      # - ollama  # Uncomment if using Ollama for LLM features
     restart: unless-stopped
     networks:
       - openthreat-network
@@ -67,18 +86,22 @@ services:
         limits:
           cpus: '1.0'
           memory: 1G
-      replicas: 2
 
   postgres:
-    image: postgres:16-alpine
+    image: docker.io/library/postgres:16-alpine
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-openthreat}
-      - POSTGRES_USER=${POSTGRES_USER:-openthreat}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-    # SECURITY: Port NOT exposed to host - only accessible within Docker network
-    # To access DB for admin tasks, use: docker compose -f docker-compose.prod.yml exec postgres psql -U openthreat
+      POSTGRES_DB: ${POSTGRES_DB:-openthreat}
+      POSTGRES_USER: ${POSTGRES_USER:-openthreat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # Not published to the host - only reachable inside openthreat-network.
+    # Admin shell: podman-compose exec postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
     networks:
       - openthreat-network
@@ -89,19 +112,24 @@ services:
           memory: 1G
     command: >
       postgres
-      -c shared_buffers=512MB
-      -c effective_cache_size=1536MB
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
       -c maintenance_work_mem=128MB
       -c max_connections=100
       -c random_page_cost=1.1
       -c effective_io_concurrency=200
 
   redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis:7-alpine
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1000
-    # SECURITY: Port NOT exposed to host - only accessible within Docker network
+    # Not published to the host - only reachable inside openthreat-network.
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
     networks:
       - openthreat-network
@@ -112,26 +140,24 @@ services:
           memory: 512M
 
   celery-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.prod
+    image: *backend-image
     command: celery -A backend.celery_app worker --loglevel=info --concurrency=1
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-openthreat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openthreat}
-      - REDIS_URL=redis://redis:6379
-      - OLLAMA_HOST=${OLLAMA_HOST:-}
-      - LLM_MODEL=${LLM_MODEL:-}
+      <<: *db-env
+      OLLAMA_HOST: ${OLLAMA_HOST:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      SECRET_KEY: ${SECRET_KEY}
     depends_on:
       - postgres
       - redis
-      # - ollama  # Uncomment if using Ollama for LLM features
     restart: unless-stopped
     networks:
       - openthreat-network
     healthcheck:
-      test: ["CMD-SHELL", "celery -A backend.celery_app inspect ping | grep -q 'pong'"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD-SHELL", "celery -A backend.celery_app inspect ping -d celery@$$HOSTNAME | grep -q pong"]
+      interval: 60s
+      timeout: 20s
       retries: 3
       start_period: 30s
     deploy:
@@ -139,16 +165,13 @@ services:
         limits:
           cpus: '2.0'
           memory: 1G
-      replicas: 2
 
   celery-beat:
-    build:
-      context: .
-      dockerfile: Dockerfile.prod
-    command: celery -A backend.celery_app beat --loglevel=info
+    image: *backend-image
+    command: celery -A backend.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-openthreat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openthreat}
-      - REDIS_URL=redis://redis:6379
+      <<: *db-env
+      SECRET_KEY: ${SECRET_KEY}
     depends_on:
       - postgres
       - redis
@@ -156,23 +179,23 @@ services:
     networks:
       - openthreat-network
     healthcheck:
-      test: ["CMD", "python", "-c", "print('ok')"]
-      interval: 30s
+      # beat has no ping; check that the beat process is alive (the slim
+      # image has no pgrep). Overrides the image's HTTP healthcheck.
+      test: ["CMD", "python", "-c", "import os,sys; sys.exit(0 if any(b'beat' in open('/proc/'+p+'/cmdline','rb').read() for p in os.listdir('/proc') if p.isdigit()) else 1)"]
+      interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 20s
     deploy:
       resources:
         limits:
           cpus: '0.25'
           memory: 256M
 
-  # Ollama service - uncomment if you want to use local LLM features
-  # Requires ~4GB RAM and ~2GB disk space for the image
+  # Ollama: either run it here (uncomment, and set OLLAMA_HOST=http://ollama:11434)
+  # or point OLLAMA_HOST at an existing inference server. Never publish 11434.
   # ollama:
-  #   image: ollama/ollama:latest
-  #   ports:
-  #     - "11434:11434"
+  #   image: docker.io/ollama/ollama:latest
   #   volumes:
   #     - ollama_data:/root/.ollama
   #   environment:
@@ -189,11 +212,9 @@ services:
 
 volumes:
   postgres_data:
-    driver: local
   redis_data:
-    driver: local
+  nginx_cache:
   # ollama_data:
-  #   driver: local
 
 networks:
   openthreat-network:

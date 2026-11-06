@@ -1,13 +1,16 @@
 # Production Dockerfile for OpenThreat Frontend
 
 # Stage 1: Build
-FROM node:18-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Build argument for API URL
-ARG NEXT_PUBLIC_API_URL=https://open-threats.com
+# API base URL baked into the client bundle. Empty = same origin: the
+# browser calls /api/... on whatever host/port served the page and nginx
+# routes it to the backend. Only set this if the API lives elsewhere.
+ARG NEXT_PUBLIC_API_URL=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_TELEMETRY_DISABLED=1
 
 # Copy package files
 COPY package*.json ./
@@ -18,32 +21,34 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build application
+# Build application (next.config.js sets output: 'standalone')
 RUN npm run build
 
-# Stage 2: Production
-FROM node:18-alpine
+# Stage 2: Production - only the standalone server and static assets
+FROM node:22-alpine
 
 WORKDIR /app
 
-# Copy built application
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    HOSTNAME=0.0.0.0 \
+    PORT=3000
 
 # Create non-root user
 RUN addgroup -g 1001 openthreat && \
-    adduser -D -u 1001 -G openthreat openthreat && \
-    chown -R openthreat:openthreat /app
+    adduser -D -u 1001 -G openthreat openthreat
+
+COPY --from=builder --chown=openthreat:openthreat /app/.next/standalone ./
+COPY --from=builder --chown=openthreat:openthreat /app/.next/static ./.next/static
 
 USER openthreat
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3000', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+    CMD node -e "require('http').get('http://127.0.0.1:3000', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)}).on('error', () => process.exit(1))"
 
 # Expose port
 EXPOSE 3000
 
 # Start application
-CMD ["npm", "start"]
+CMD ["node", "server.js"]

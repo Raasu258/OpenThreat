@@ -148,3 +148,5 @@ sessions/
 config.private.yml
 config.local.yml
 settings.local.py
+# Pull-based deploy state (deploy/deploy.sh)
+.deploy/
