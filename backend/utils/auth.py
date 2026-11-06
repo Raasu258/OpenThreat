@@ -7,9 +7,9 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
@@ -22,8 +22,23 @@ security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT settings
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production-please-use-strong-secret")
+_DEFAULT_SECRET = "change-me-in-production-please-use-strong-secret"
+_MIN_SECRET_LENGTH = 32
+
+SECRET_KEY = os.getenv("SECRET_KEY") or _DEFAULT_SECRET
 ALGORITHM = "HS256"
+
+if SECRET_KEY == _DEFAULT_SECRET or len(SECRET_KEY) < _MIN_SECRET_LENGTH:
+    # An empty or default key means anyone can forge tokens (incl. admin).
+    # Compose passes SECRET_KEY=${SECRET_KEY}, so a missing .env entry
+    # arrives as "" rather than unset.
+    if os.getenv("ENVIRONMENT", "development").lower() == "production":
+        raise RuntimeError(
+            f"SECRET_KEY must be set to a random value of at least "
+            f"{_MIN_SECRET_LENGTH} characters in production "
+            f"(e.g. `openssl rand -hex 32`)."
+        )
+    logger.warning("SECRET_KEY is unset or weak - JWTs are forgeable. Dev only!")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(
     os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60")
 )  # 1 hour default
@@ -100,9 +115,14 @@ def decode_access_token(token: str) -> dict:
         HTTPException: If token is invalid or expired
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"require": ["exp", "iat"]},
+        )
         return payload
-    except JWTError as e:
+    except jwt.PyJWTError as e:
         logger.warning(f"JWT decode error: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -168,7 +188,7 @@ async def get_current_user(
                 detail="Could not validate credentials",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-    except JWTError:
+    except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
