@@ -3,6 +3,7 @@ CSRF token endpoints.
 """
 
 import logging
+import os
 
 from fastapi import APIRouter, Request, Response
 from fastapi_csrf_protect import CsrfProtect
@@ -10,6 +11,17 @@ from fastapi_csrf_protect import CsrfProtect
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@CsrfProtect.load_config
+def _csrf_config():
+    # Without a configured secret, CsrfProtect() raises on every call and
+    # /csrf-token always returned 500.
+    return [
+        ("secret_key", os.getenv("CSRF_SECRET_KEY") or os.getenv("SECRET_KEY")),
+        ("cookie_secure", True),
+        ("cookie_samesite", "lax"),
+    ]
 
 
 @router.get("/csrf-token")
