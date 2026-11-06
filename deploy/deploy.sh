@@ -37,9 +37,21 @@ main() {
   BACKUP_KEEP="$(env_get DEPLOY_BACKUP_KEEP)"; BACKUP_KEEP="${BACKUP_KEEP:-14}"
   NOTIFY_URL="$(env_get DEPLOY_NOTIFY_URL)"
 
-  # One deploy at a time (timer + manual run)
-  exec 9>"$STATE_DIR/lock"
-  flock -n 9 || { log "another deploy is running, skipping"; return 0; }
+  # One deploy at a time (timer + manual run).
+  # The script re-runs itself under `flock -o`: the flock process holds the
+  # lock and the script does NOT get the lock fd. Holding it in the script
+  # (exec 9>lock) leaked the fd into everything it started - podman's
+  # conmon processes outlive the deploy, so the lock was never released.
+  if [ "${OT_DEPLOY_LOCKED:-}" != 1 ]; then
+    local rc=0
+    OT_DEPLOY_LOCKED=1 flock -n -E 75 -o "$STATE_DIR/lock" \
+      "$(readlink -f "${BASH_SOURCE[0]}")" "$@" || rc=$?
+    if [ "$rc" -eq 75 ]; then
+      log "another deploy is running, skipping"
+      return 0
+    fi
+    return "$rc"
+  fi
 
   case "${1:-}" in
     --status)   status; return 0 ;;
@@ -176,6 +188,10 @@ deploy() {
   fi
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     die "tracked files modified on the VPS - commit them to the $BRANCH branch instead: $(git status --porcelain --untracked-files=no | tr '\n' ' ')"
+  fi
+  local secret; secret="$(env_get SECRET_KEY)"
+  if [ "${#secret}" -lt 32 ]; then
+    die "SECRET_KEY in .env is missing or shorter than 32 chars - the backend refuses to start. Fix: sed -i \"s|^SECRET_KEY=.*|SECRET_KEY=\$(openssl rand -hex 32)|\" .env"
   fi
   if [ "$(state_get failed)" = "$target" ] && [ "$FORCE" != 1 ]; then
     return 0   # this commit already failed and was rolled back; wait for a new one
