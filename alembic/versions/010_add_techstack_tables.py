@@ -47,7 +47,6 @@ def upgrade() -> None:
 
     # Create index for faster lookups
     op.create_index("ix_tech_stacks_user_id", "tech_stacks", ["user_id"])
-    op.create_index("ix_tech_stacks_session_id", "tech_stacks", ["session_id"])
 
     # Create tech_stack_matches table for caching CVE matches
     op.create_table(
