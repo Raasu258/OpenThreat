@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..celery_app import celery_app
-from ..dependencies.auth import require_role
+from ..dependencies.auth import require_admin, require_role
 from ..models import UserRole
 from ..tasks import get_llm_stats, process_llm_queue, process_new_cves
 
@@ -78,7 +78,7 @@ async def trigger_llm_batch(batch_size: int = 10, priority: str = "high"):
     )
 
 
-@router.get("/tasks/llm-stats")
+@router.get("/tasks/llm-stats", dependencies=[Depends(require_admin)])
 async def get_llm_processing_stats():
     """
     Get LLM processing statistics.
@@ -92,7 +92,11 @@ async def get_llm_processing_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+@router.get(
+    "/tasks/{task_id}",
+    response_model=TaskStatusResponse,
+    dependencies=[Depends(require_admin)],
+)
 async def get_task_status(task_id: str):
     """
     Get the status of a background task.
@@ -119,7 +123,7 @@ async def get_task_status(task_id: str):
     return response
 
 
-@router.get("/tasks/scheduled/list")
+@router.get("/tasks/scheduled/list", dependencies=[Depends(require_admin)])
 async def list_scheduled_tasks():
     """
     List all scheduled tasks (Beat schedule).
@@ -142,7 +146,7 @@ async def list_scheduled_tasks():
     return {"scheduled_tasks": tasks, "total": len(tasks)}
 
 
-@router.get("/tasks/workers/status")
+@router.get("/tasks/workers/status", dependencies=[Depends(require_admin)])
 async def get_workers_status():
     """
     Get status of Celery workers.
