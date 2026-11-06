@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pull-based deploy for OpenThreat on a rootless Podman host.
 #
-#   deploy/deploy.sh             deploy origin/deploy if it moved (used by the timer)
+#   deploy/deploy.sh             deploy origin/main if it moved (used by the timer)
 #   deploy/deploy.sh --force     redeploy the current target even if unchanged
 #   deploy/deploy.sh --rollback  go back to the previous successful deploy
 #   deploy/deploy.sh --status    show what is deployed
@@ -25,7 +25,7 @@ main() {
 
   export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-openthreat}"
   COMPOSE="${PODMAN_COMPOSE:-podman-compose}"
-  BRANCH="${DEPLOY_BRANCH:-deploy}"
+  BRANCH="${DEPLOY_BRANCH:-main}"
   STATE_DIR="$REPO_DIR/.deploy"
   mkdir -p "$STATE_DIR"
 

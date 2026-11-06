@@ -1,11 +1,11 @@
-# Deploying OpenThreat (fork `deploy` branch)
+# Deploying OpenThreat (fork, `main` branch)
 
 ```
  GitHub                                       VPS (rootless Podman)
  ──────                                       ─────────────────────
- push / merged PR on `deploy`                  openthreat-deploy.timer (every 10 min)
+ push / merged PR on `main`                    openthreat-deploy.timer (every 10 min)
    └─ Actions: images.yml                        └─ deploy/deploy.sh
-        audit ─ pip-audit, npm audit                  git fetch origin deploy
+        audit ─ pip-audit, npm audit                  git fetch origin main
         test  ─ unit + smoke vs Postgres/Redis        new commit? pull ghcr …:sha-<commit>
         images─ build, SBOM, provenance               (not there yet → retry next run)
                 push ghcr.io/<owner>/…:sha-<commit>   pg_dump backup
@@ -22,10 +22,10 @@ GHCR). Every running image corresponds to exactly one commit.
 ## One-time setup
 
 1. **GitHub**
-   - Actions → enable workflows for the fork. Then disable the inherited
-     `Deploy to Production` workflow (it still exists on `main`, and syncing
-     the fork pushes to `main`): Actions → *Deploy to Production* → ⋯ →
-     *Disable workflow*.
+   - Actions → enable workflows for the fork (only `images.yml` exists).
+   - Optional: Settings → Branches → protect `main` and require the
+     `Dependency audit` and `Tests + integration smoke test` checks, so
+     nothing reaches the VPS without passing them.
    - After the first successful `Images` run: your profile → Packages →
      `openthreat-backend` / `openthreat-frontend` → Package settings →
      *Change visibility* → Public. (Or keep them private and run
@@ -35,6 +35,7 @@ GHCR). Every running image corresponds to exactly one commit.
 
 2. **VPS** (as the stack user, in the repo checkout)
    ```bash
+   git fetch origin && git checkout -B main origin/main   # VPS follows main
    cp .env.vps.example .env.new   # merge your existing values into it
    # required: POSTGRES_*, SECRET_KEY (>= 32 chars), CSRF_SECRET_KEY,
    #           OT_REGISTRY, NGINX_HTTP(S)_PORT
@@ -46,7 +47,7 @@ GHCR). Every running image corresponds to exactly one commit.
 
 | What | How |
 |---|---|
-| Ship a change | merge/push to `deploy` → CI → live within ~10 min after CI is green |
+| Ship a change | merge/push to `main` → CI → live within ~10 min after CI is green |
 | Dependabot update | review + merge the PR (CI must be green) |
 | What's running | `deploy/deploy.sh --status` |
 | Deploy now | `systemctl --user start openthreat-deploy.service` |
@@ -76,10 +77,10 @@ systemctl --user start openthreat-deploy.timer
 ## Rules for the VPS checkout
 
 - Don't edit tracked files on the VPS; the deploy refuses to run on a
-  dirty tree. Change them on `deploy` and push.
+  dirty tree. Change them on `main` and push.
 - Local-only files stay untracked: `.env`, `nginx/ssl/`, `.deploy/`.
-- Rebasing `deploy` onto upstream and force-pushing is fine; the VPS
-  follows the rewritten history.
+- Upstream changes: `git fetch upstream && git merge upstream/main`, then
+  push. (A rebase + force-push also works; the VPS follows rewritten history.)
 
 ## Metrics
 

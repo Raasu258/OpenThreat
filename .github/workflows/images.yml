@@ -1,5 +1,5 @@
 # Audit, test and build the OpenThreat images; publish them to GHCR on
-# pushes to `deploy`. The VPS pulls `sha-<commit>` images on its own
+# pushes to `main`. The VPS pulls `sha-<commit>` images on its own
 # (deploy/deploy.sh via a systemd timer) - nothing here can reach the VPS.
 #
 # Third-party actions are pinned to commit SHAs (tags can be moved);
@@ -9,9 +9,9 @@ name: Images
 
 on:
   push:
-    branches: [deploy]
+    branches: [main]
   pull_request:
-    branches: [deploy]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -142,7 +142,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=sha,format=long
-            type=raw,value=deploy,enable=${{ github.ref == 'refs/heads/deploy' }}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
 
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

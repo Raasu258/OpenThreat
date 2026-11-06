@@ -9,7 +9,7 @@
 #
 # All settings come from .env (see .env.vps.example).
 
-x-backend-image: &backend-image ${OT_REGISTRY:-ghcr.io/raasu258}/openthreat-backend:${OT_IMAGE_TAG:-deploy}
+x-backend-image: &backend-image ${OT_REGISTRY:-ghcr.io/raasu258}/openthreat-backend:${OT_IMAGE_TAG:-main}
 
 x-db-env: &db-env
   DATABASE_URL: postgresql://${POSTGRES_USER:-openthreat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openthreat}
@@ -41,7 +41,7 @@ services:
       - openthreat-network
 
   frontend:
-    image: ${OT_REGISTRY:-ghcr.io/raasu258}/openthreat-frontend:${OT_IMAGE_TAG:-deploy}
+    image: ${OT_REGISTRY:-ghcr.io/raasu258}/openthreat-frontend:${OT_IMAGE_TAG:-main}
     environment:
       NODE_ENV: production
       # Server-side rendering talks to the backend directly; the browser

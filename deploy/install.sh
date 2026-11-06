@@ -49,17 +49,17 @@ fi
 
 # Can we pull from GHCR?
 registry="$(sed -n 's/^OT_REGISTRY=//p' .env | tail -n1)"; registry="${registry:-ghcr.io/raasu258}"
-if podman pull -q "$registry/openthreat-backend:deploy" >/dev/null 2>&1; then
+if podman pull -q "$registry/openthreat-backend:main" >/dev/null 2>&1; then
   say "GHCR pull works ($registry)"
 else
-  warn "could not pull $registry/openthreat-backend:deploy."
+  warn "could not pull $registry/openthreat-backend:main."
   warn "Either CI hasn't published yet, or the package is private:"
   warn "  make the packages public on GitHub, or: podman login ghcr.io  (PAT with read:packages only)"
 fi
 
 cat <<EOF
 
-Done. The timer checks origin/deploy every 10 minutes.
+Done. The timer checks origin/main every 10 minutes.
 
   First deploy now:   $REPO_DIR/deploy/deploy.sh --force
   Status:             $REPO_DIR/deploy/deploy.sh --status
