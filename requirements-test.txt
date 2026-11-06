@@ -4,12 +4,12 @@
 pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
-pytest-mock==3.12.0
+pytest-mock==3.17.0
 
 # HTTP testing
 # ollama 0.4.4 (requirements.txt) needs httpx>=0.27
 httpx>=0.27,<0.28
-requests-mock==1.11.0
+requests-mock==1.12.1
 
 # Database testing
 faker==20.1.0
@@ -21,4 +21,4 @@ mypy==1.7.1
 isort==5.13.2
 
 # Coverage
-coverage[toml]==7.3.4
+coverage[toml]==7.17.1
