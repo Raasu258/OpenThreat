@@ -118,6 +118,7 @@ ssh_keys/
 
 # Database backups - may contain sensitive data!
 *.sql
+!scripts/ci/*.sql
 *.sql.gz
 *.dump
 *.bak
