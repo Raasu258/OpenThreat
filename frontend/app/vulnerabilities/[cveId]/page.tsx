@@ -24,6 +24,7 @@ import {
   explainCVE,
 } from "@/lib/explanations";
 import { notFound } from "next/navigation";
+import { productPath } from "@/lib/filters";
 
 // API URL - use internal Docker network URL for SSR, public URL for client
 const getApiUrl = () => {
@@ -235,7 +236,9 @@ export default async function VulnerabilityDetailPage({
                 </h3>
                 <div className="flex flex-wrap gap-2">
                   {vuln.vendors.map((vendor) => (
-                    <Badge key={vendor} variant="outline" className="capitalize">{vendor}</Badge>
+                    <Link key={vendor} href={productPath(vendor)} title={`All CVEs of ${vendor}`}>
+                      <Badge variant="outline" className="capitalize hover:border-primary hover:text-primary cursor-pointer">{vendor}</Badge>
+                    </Link>
                   ))}
                 </div>
               </div>
@@ -248,9 +251,20 @@ export default async function VulnerabilityDetailPage({
                   Affected Products
                 </h3>
                 <div className="flex flex-wrap gap-2">
-                  {vuln.products.map((product) => (
-                    <Badge key={product} variant="outline" className="capitalize">{product}</Badge>
-                  ))}
+                  {vuln.products.map((product) => {
+                    // A product page needs its vendor; with several vendors the
+                    // pairing is ambiguous, so fall back to the filtered list.
+                    const vendors = vuln.vendors ?? [];
+                    const href =
+                      vendors.length === 1
+                        ? productPath(vendors[0], product)
+                        : `/?product=${encodeURIComponent(product)}`;
+                    return (
+                      <Link key={product} href={href} title={`All CVEs of ${product}`}>
+                        <Badge variant="outline" className="capitalize hover:border-primary hover:text-primary cursor-pointer">{product}</Badge>
+                      </Link>
+                    );
+                  })}
                 </div>
               </div>
             )}

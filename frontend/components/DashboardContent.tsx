@@ -1,12 +1,25 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Shield, Clock, Calendar, Filter, X, Search, ChevronLeft, ChevronRight } from "lucide-react";
+import { AlertTriangle, Shield, Clock, Calendar, Filter, Search, ChevronLeft, ChevronRight, BarChart3, Package } from "lucide-react";
 import Link from "next/link";
 import { formatDate, getSeverityBadgeColor, getSeverityAccentColor } from "@/lib/utils";
+import { FilterChips, FilterPanel } from "@/components/FilterPanel";
+import {
+  DEFAULT_FILTERS,
+  Filters,
+  SORT_OPTIONS,
+  SortKey,
+  activeFilterCount,
+  filtersFromParams,
+  filtersToApiParams,
+  filtersToQuery,
+  productPath,
+} from "@/lib/filters";
 
 const CLIENT_API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
@@ -27,147 +40,77 @@ function setCachedData(key: string, data: any) {
 }
 
 export function DashboardContent() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // All filter state lives in the URL (bookmarkable, back/forward works)
+  const filters = useMemo(
+    () => filtersFromParams(new URLSearchParams(searchParams.toString())),
+    [searchParams]
+  );
+  const activeCount = activeFilterCount(filters);
+  const page = filters.page;
+
   const [recentVulns, setRecentVulns] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-
-  // Filter states
-  const [showFilters, setShowFilters] = useState(false);
-  const [severity, setSeverity] = useState("");
-  const [exploited, setExploited] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
   const [isFiltering, setIsFiltering] = useState(false);
-  const [page, setPage] = useState(1);
-  const [isSearchMode, setIsSearchMode] = useState(false);
+  const [showFilters, setShowFilters] = useState(activeCount > 0);
+  const [searchQuery, setSearchQuery] = useState(filters.q);
 
-  // Track if we've already fetched to prevent double-fetching
-  const hasFetched = useRef(false);
+  useEffect(() => setSearchQuery(filters.q), [filters.q]);
 
+  const updateFilters = (patch: Partial<Filters>) => {
+    const next: Filters = { ...filters, ...patch };
+    if (!("page" in patch)) next.page = 1;
+    const qs = filtersToQuery(next);
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
+
+  // Load whenever the URL filters change
   useEffect(() => {
-    if (!hasFetched.current) {
-      hasFetched.current = true;
-      fetchInitialData();
-    }
-  }, []);
-
-  const fetchInitialData = async () => {
-    try {
-      const cachedVulns = getCachedData('vulns:default');
-
-      if (cachedVulns) {
-        setRecentVulns(cachedVulns);
-        setLoading(false);
-        return;
-      }
-
-      const res = await fetch(`${CLIENT_API_URL}/api/v1/vulnerabilities?page_size=20&sort_by=published_at&sort_order=desc`);
-      const vulnsData = await res.json();
-
-      setCachedData('vulns:default', vulnsData);
-      setRecentVulns(vulnsData);
-    } catch (error) {
-      console.error("Failed to fetch data:", error);
-    } finally {
+    const apiQuery = filtersToApiParams(filters).toString();
+    const cached = getCachedData(apiQuery);
+    if (cached) {
+      setRecentVulns(cached);
       setLoading(false);
+      return;
     }
-  };
-
-  const fetchFilteredVulns = async (newSeverity: string, newExploited: string, newPage: number = 1, query: string = "") => {
+    const controller = new AbortController();
     setIsFiltering(true);
-
-    try {
-      if (query) {
-        const params = new URLSearchParams({
-          page: newPage.toString(),
-          page_size: "20",
-        });
-        params.append("q", query);
-        if (newSeverity) params.append("severity", newSeverity);
-        if (newExploited) params.append("exploited", newExploited);
-
-        const res = await fetch(`${CLIENT_API_URL}/api/v1/search?${params}`);
-        if (res.ok) {
-          const data = await res.json();
-          setRecentVulns(data);
-          setIsSearchMode(true);
-        }
-      } else {
-        const cacheKey = `vulns:${newSeverity}:${newExploited}:${newPage}`;
-        const cached = getCachedData(cacheKey);
-
-        if (cached && newPage === 1) {
-          setRecentVulns(cached);
-          setIsFiltering(false);
-          setIsSearchMode(false);
-          return;
-        }
-
-        const params = new URLSearchParams({
-          page: newPage.toString(),
-          page_size: "20",
-          sort_by: "published_at",
-          sort_order: "desc",
-        });
-
-        if (newSeverity) params.append("severity", newSeverity);
-        if (newExploited) params.append("exploited", newExploited);
-
-        const res = await fetch(`${CLIENT_API_URL}/api/v1/vulnerabilities?${params}`);
-
-        if (res.ok) {
-          const data = await res.json();
-          if (newPage === 1) {
-            setCachedData(cacheKey, data);
-          }
-          setRecentVulns(data);
-          setIsSearchMode(false);
-        }
-      }
-    } catch (error) {
-      console.error("Failed to fetch filtered data:", error);
-    } finally {
-      setIsFiltering(false);
-    }
-  };
-
-  const handleSeverityChange = (value: string) => {
-    setSeverity(value);
-    setPage(1);
-    fetchFilteredVulns(value, exploited, 1, searchQuery);
-  };
-
-  const handleExploitedChange = (value: string) => {
-    setExploited(value);
-    setPage(1);
-    fetchFilteredVulns(severity, value, 1, searchQuery);
-  };
+    fetch(`${CLIENT_API_URL}/api/v1/search?${apiQuery}`, { signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
+      .then((data) => {
+        setCachedData(apiQuery, data);
+        setRecentVulns(data);
+      })
+      .catch((error) => {
+        if (error?.name !== "AbortError") console.error("Failed to fetch vulnerabilities:", error);
+      })
+      .finally(() => {
+        setIsFiltering(false);
+        setLoading(false);
+      });
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    setPage(1);
-    fetchFilteredVulns(severity, exploited, 1, searchQuery);
+    updateFilters({ q: searchQuery.trim() });
   };
 
   const handlePageChange = (newPage: number) => {
-    setPage(newPage);
-    fetchFilteredVulns(severity, exploited, newPage, searchQuery);
+    updateFilters({ page: newPage });
     window.scrollTo({ top: 300, behavior: 'smooth' });
   };
 
   const resetFilters = () => {
-    setSeverity("");
-    setExploited("");
     setSearchQuery("");
-    setPage(1);
-    setIsSearchMode(false);
-    const cached = getCachedData('vulns:default');
-    if (cached) {
-      setRecentVulns(cached);
-    } else {
-      fetchFilteredVulns("", "", 1, "");
-    }
+    updateFilters({ ...DEFAULT_FILTERS, sort: filters.sort });
   };
 
-  const hasActiveFilters = severity || exploited || searchQuery;
+  const isSearchMode = activeCount > 0;
 
   if (loading || !recentVulns) {
     return (
@@ -221,75 +164,74 @@ export function DashboardContent() {
       <div className="space-y-4">
         {/* Header */}
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-xl md:text-2xl font-bold text-gray-900 dark:text-white">
-              {isSearchMode ? 'Search Results' : 'Recent CVEs'}
+              {isSearchMode ? 'Filtered CVEs' : 'Recent CVEs'}
             </h2>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               {recentVulns && (
                 <span className="text-sm text-gray-500 dark:text-gray-400">
-                  {recentVulns.total?.toLocaleString() || 0} results
+                  {isFiltering ? "Loading..." : `${recentVulns.total?.toLocaleString() || 0} results`}
                 </span>
               )}
+              <select
+                aria-label="Sort order"
+                value={filters.sort}
+                onChange={(e) => updateFilters({ sort: e.target.value as SortKey })}
+                disabled={isFiltering}
+                className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+              >
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.key} value={o.key}>{o.label}</option>
+                ))}
+              </select>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setShowFilters(!showFilters)}
-                className={hasActiveFilters ? "border-primary text-primary" : ""}
+                aria-expanded={showFilters}
+                className={activeCount > 0 ? "border-primary text-primary" : ""}
               >
                 <Filter className="h-4 w-4 md:mr-2" />
                 <span className="hidden md:inline">Filter</span>
-                {hasActiveFilters && <span className="ml-1 md:ml-2 bg-primary text-primary-foreground rounded-full w-2 h-2 md:w-auto md:h-auto md:px-2 md:py-0.5 text-xs">•</span>}
+                {activeCount > 0 && (
+                  <span className="ml-1 md:ml-2 bg-primary text-primary-foreground rounded-full px-1.5 md:px-2 py-0.5 text-xs">
+                    {activeCount}
+                  </span>
+                )}
               </Button>
             </div>
           </div>
+
+          <FilterChips filters={filters} onChange={updateFilters} />
+
+          {filters.vendor && (
+            <Link
+              href={productPath(filters.vendor, filters.product || undefined)}
+              className="inline-flex items-center gap-2 text-sm font-medium text-primary hover:underline"
+            >
+              <BarChart3 className="h-4 w-4" />
+              Timeline and overview for {filters.product ? `${filters.vendor} ${filters.product}` : filters.vendor}
+            </Link>
+          )}
         </div>
 
-        {/* Filter Bar */}
+        {/* Filter Panel */}
         {showFilters && (
-          <Card className="p-4 bg-gray-50 dark:bg-gray-800">
-            <div className="flex flex-wrap items-center gap-3">
-              <select
-                value={severity}
-                onChange={(e) => handleSeverityChange(e.target.value)}
-                disabled={isFiltering}
-                className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
-              >
-                <option value="">All Severities</option>
-                <option value="CRITICAL">Critical</option>
-                <option value="HIGH">High</option>
-                <option value="MEDIUM">Medium</option>
-                <option value="LOW">Low</option>
-              </select>
+          <FilterPanel
+            filters={filters}
+            onChange={updateFilters}
+            onReset={resetFilters}
+            disabled={isFiltering}
+          />
+        )}
 
-              <select
-                value={exploited}
-                onChange={(e) => handleExploitedChange(e.target.value)}
-                disabled={isFiltering}
-                className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
-              >
-                <option value="">All CVEs</option>
-                <option value="true">Exploited Only</option>
-                <option value="false">Not Exploited</option>
-              </select>
-
-              {hasActiveFilters && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={resetFilters}
-                  disabled={isFiltering}
-                  className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
-                >
-                  <X className="h-4 w-4 mr-1" />
-                  Reset
-                </Button>
-              )}
-
-              <span className="text-sm text-gray-600 dark:text-gray-400 ml-auto">
-                {isFiltering ? "Loading..." : `Page ${page} of ${recentVulns.total_pages || 1}`}
-              </span>
-            </div>
+        {recentVulns.items.length === 0 && (
+          <Card className="p-8 text-center text-gray-600 dark:text-gray-400">
+            No CVEs match these filters.
+            {activeCount > 0 && (
+              <Button variant="link" onClick={resetFilters} className="ml-1">Reset filters</Button>
+            )}
           </Card>
         )}
 
@@ -334,6 +276,14 @@ export function DashboardContent() {
                       </p>
 
                       <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600 dark:text-gray-400">
+                        {(vuln.vendors?.length > 0 || vuln.products?.length > 0) && (
+                          <span className="flex items-center gap-1 min-w-0">
+                            <Package className="h-3 w-3 shrink-0" />
+                            <span className="truncate max-w-[22rem]">
+                              {[...(vuln.vendors ?? []).slice(0, 2), ...(vuln.products ?? []).slice(0, 2)].join(" · ")}
+                            </span>
+                          </span>
+                        )}
                         {vuln.cvss_score && (
                           <span className="flex items-center gap-1">
                             <Shield className="h-3 w-3" />
