@@ -88,10 +88,11 @@ async def list_vulnerabilities(
 
     # Apply sorting with validated enum (safe from SQL injection)
     sort_column = getattr(Vulnerability, sort_by.value)
+    # Missing values (e.g. CVEs without a publish date) always go last
     if sort_order == SortOrderEnum.ASC:
-        query = query.order_by(asc(sort_column))
+        query = query.order_by(asc(sort_column).nullslast(), asc(Vulnerability.id))
     else:
-        query = query.order_by(desc(sort_column))
+        query = query.order_by(desc(sort_column).nullslast(), desc(Vulnerability.id))
 
     # Apply pagination
     offset = (page - 1) * page_size

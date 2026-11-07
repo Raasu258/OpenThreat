@@ -5,7 +5,7 @@ Pydantic schemas for API request/response validation.
 from datetime import date, datetime
 from typing import Any, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class VulnerabilityBase(BaseModel):
@@ -27,11 +27,22 @@ class VulnerabilityList(VulnerabilityBase):
     published_at: Optional[datetime] = None
     modified_at: Optional[datetime] = None
     sources: Optional[List[str]] = None
+    vendors: Optional[List[str]] = None
+    products: Optional[List[str]] = None
     simple_title: Optional[str] = None
     simple_description: Optional[str] = None
     llm_processed: bool = False
     upvotes: int = 0
     downvotes: int = 0
+
+    @field_validator("vendors", "products", mode="before")
+    @classmethod
+    def _string_list(cls, value):
+        # The JSON columns aren't constrained; never fail a whole list
+        # response because one row holds something that isn't a list.
+        if not isinstance(value, list):
+            return None
+        return [str(v) for v in value if v is not None]
 
     class Config:
         from_attributes = True

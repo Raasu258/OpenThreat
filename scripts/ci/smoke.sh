@@ -73,6 +73,32 @@ psql -q "$PG_URL" -c "UPDATE users SET role='ADMIN' WHERE username='smoke';" >/d
 psql -q "$PG_URL" -c "UPDATE users SET role='admin' WHERE username='smoke';" >/dev/null 2>&1
 check "GET admin/stats as admin"       200 "$(c -H "Authorization: Bearer $TOKEN" "$B/api/v1/admin/stats")"
 
+# --- filters, sorting, catalog (seeded edge cases)
+psql -q "$PG_URL" -v ON_ERROR_STOP=1 -f "$(dirname "$0")/seed_filter_data.sql" >/dev/null
+check "seed filter data" 0 $?
+J() { python -c "import json,sys; d=json.load(open(sys.argv[1])); print($1)" "$BODY"; }
+c "$B/api/v1/search?page_size=20" >/dev/null
+check "default order newest first, undated last" \
+  "90005,90006,90001,90008,90002,90003,90004,90007" \
+  "$(J '",".join(i["cve_id"][-5:] for i in d["items"])')"
+c "$B/api/v1/search?vendor=sun" >/dev/null
+check "vendor exact match (Sun != Samsung)" "90006" "$(J '",".join(i["cve_id"][-5:] for i in d["items"])')"
+c "$B/api/v1/search?vendor=NGINX" >/dev/null
+check "vendor case-insensitive" 5 "$(J 'd["total"]')"
+c "$B/api/v1/search?vendor=nginx&product=nginx&days=60" >/dev/null
+check "vendor+product+days" "90001,90002" "$(J '",".join(i["cve_id"][-5:] for i in d["items"])')"
+c "$B/api/v1/search?cwe=787&sort_by=cvss_score&sort_order=asc" >/dev/null
+check "cwe filter + sort asc" "90003,90005,90001" "$(J '",".join(i["cve_id"][-5:] for i in d["items"])')"
+check "invalid sort_by -> 422"           422 "$(c "$B/api/v1/search?sort_by=__class__")"
+check "invalid date -> 422"              422 "$(c "$B/api/v1/search?published_after=yesterday")"
+c "$B/api/v1/catalog/vendors?q=ng" >/dev/null
+check "catalog vendors (prefix first, then substring)" "Nginx:5,Samsung:1" "$(J '",".join(i["name"]+":"+str(i["count"]) for i in d["items"])')"
+c "$B/api/v1/catalog/products?vendor=nginx" >/dev/null
+check "catalog products of vendor" "Nginx:4,Njs:1" "$(J '",".join(i["name"]+":"+str(i["count"]) for i in d["items"])')"
+c "$B/api/v1/catalog/timeline?vendor=nginx&product=nginx&months=24" >/dev/null
+check "timeline buckets + summary" "24/4/1" "$(J 'str(len(d["buckets"]))+"/"+str(d["summary"]["total"])+"/"+str(d["summary"]["exploited"])')"
+psql -q "$PG_URL" -c "DELETE FROM vulnerabilities WHERE cve_id LIKE 'CVE-20__-9000_';" >/dev/null
+
 printf 'requests==2.0.0\nflask==0.12\n' > "$LOG_DIR/requirements.txt"
 check "POST techstack/scan (multipart)" 200 "$(c -X POST -F "file=@$LOG_DIR/requirements.txt;filename=requirements.txt" -F name=smoke "$B/api/v1/techstack/scan")"
 

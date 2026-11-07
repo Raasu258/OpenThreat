@@ -92,6 +92,7 @@ from .api import (
     analytics,
     auth,
     bookmarks,
+    catalog,
     comments,
     csrf,
     feeds,
@@ -118,6 +119,7 @@ app.include_router(bookmarks.router, prefix="/api/v1", tags=["Bookmarks"])
 app.include_router(notifications.router, prefix="/api/v1", tags=["Notifications"])
 app.include_router(stats.router, prefix="/api/v1", tags=["Statistics"])
 app.include_router(search.router, prefix="/api/v1", tags=["Search"])
+app.include_router(catalog.router, prefix="/api/v1", tags=["Catalog"])
 app.include_router(feeds.router, prefix="/api/v1", tags=["Feeds"])
 app.include_router(tasks.router, prefix="/api/v1", tags=["Tasks"])
 app.include_router(llm.router, prefix="/api/v1", tags=["LLM Processing"])
