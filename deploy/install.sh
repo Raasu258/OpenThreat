@@ -113,6 +113,7 @@ tag_current "sha-$target"
 log "units -> $QUADLET_DIR, $UNIT_DIR"
 render_units >/dev/null
 systemctl --user enable openthreat.target >/dev/null
+ensure_socket restart
 
 log "starting postgres + redis"
 systemctl --user start openthreat-postgres.service openthreat-redis.service
