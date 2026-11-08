@@ -50,9 +50,19 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# Re-published as OCI images, like GHCR gets them from CI (provenance/SBOM):
+# Podman ignores a Dockerfile HEALTHCHECK in OCI images, so the units must
+# define their own - a Docker-format image here would hide that.
 push_images() { # tag backend-src frontend-src
-  docker tag "$2" "$REG/openthreat-backend:$1";  docker push -q "$REG/openthreat-backend:$1" >/dev/null
-  docker tag "$3" "$REG/openthreat-frontend:$1"; docker push -q "$REG/openthreat-frontend:$1" >/dev/null
+  local svc src
+  for svc in backend frontend; do
+    if [ "$svc" = backend ]; then src="$2"; else src="$3"; fi
+    docker tag "$src" "$REG/openthreat-$svc:$1-docker"
+    docker push -q "$REG/openthreat-$svc:$1-docker" >/dev/null
+    podman pull -q "$REG/openthreat-$svc:$1-docker" >/dev/null
+    podman push -q --format oci "$REG/openthreat-$svc:$1-docker" "$REG/openthreat-$svc:$1"
+    podman rmi -f "$REG/openthreat-$svc:$1-docker" >/dev/null
+  done
 }
 
 echo "== environment"
@@ -137,6 +147,13 @@ expect "pre-migration backup kept" 1 "$(find "$W/backups" -name '*pre-quadlet.du
 expect "deploy timer enabled" enabled "$(systemctl --user is-enabled openthreat-deploy.timer)"
 expect "stack target enabled" enabled "$(systemctl --user is-enabled openthreat.target)"
 expect "postgres not published" "" "$(podman port openthreat-postgres)"
+health() { podman inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null || echo missing; }
+for c in openthreat-postgres openthreat-redis openthreat-backend openthreat-frontend; do
+  wait_for 120 sh -c "[ \"\$(podman inspect --format '{{.State.Health.Status}}' $c 2>/dev/null)\" = healthy ]" || true
+  expect "$c reports healthy" healthy "$(health "$c")"
+done
+expect "all units active (not stuck activating)" "" \
+  "$(for u in postgres redis backend frontend worker beat nginx; do systemctl --user is-active --quiet "openthreat-$u.service" || echo "$u"; done)"
 
 echo "== nothing new -> no-op"
 deploy/deploy.sh

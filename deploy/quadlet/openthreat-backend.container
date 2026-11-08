@@ -14,7 +14,14 @@ Network=openthreat.network
 IP=@SUBNET@.20
 PodmanArgs=--network-alias=backend --memory=1g --cpus=1
 EnvironmentFile=@STATE@/app.env
-# Health check comes from the image (GET /health). Hung -> killed -> restarted.
+# Health check defined here, not taken from the image: CI publishes OCI
+# images (provenance/SBOM), and Podman ignores the Dockerfile HEALTHCHECK
+# in OCI images. Hung -> killed -> restarted by systemd.
+HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)"
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=60s
 HealthOnFailure=kill
 Notify=healthy
 
