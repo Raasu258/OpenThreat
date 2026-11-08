@@ -114,9 +114,9 @@ tag_current "sha-$target"
 log "units -> $QUADLET_DIR, $UNIT_DIR"
 render_units >/dev/null       # also stops + removes units no longer in the repo
 
-# The public ports must be free now (or held by our own nginx from a
-# previous run of this script).
-systemctl --user stop openthreat-nginx.service 2>/dev/null || true
+# The public ports must be free now. Our own nginx/socket from a previous
+# run of this script may hold them - stop those first.
+systemctl --user stop openthreat-nginx.service openthreat-nginx.socket 2>/dev/null || true
 for port in "$HTTP_PORT" "$HTTPS_PORT"; do
   holder="$(port_holder "$port")"
   [ -z "$holder" ] || die "port $port is still in use: $holder
@@ -124,6 +124,7 @@ for port in "$HTTP_PORT" "$HTTPS_PORT"; do
             systemctl --user list-sockets; sudo ss -ltnp 'sport = :$port')"
 done
 systemctl --user enable openthreat.target >/dev/null
+ensure_socket restart
 
 log "starting postgres + redis"
 systemctl --user start openthreat-postgres.service openthreat-redis.service

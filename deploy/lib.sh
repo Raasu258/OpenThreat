@@ -95,7 +95,7 @@ render_units() {
         -e "s#@HTTP_PORT@#$HTTP_PORT#g" -e "s#@HTTPS_PORT@#$HTTPS_PORT#g" "$src" > "$tmp"
     if ! cmp -s "$tmp" "$dst" 2>/dev/null; then
       mv "$tmp" "$dst"; chmod 644 "$dst"
-      case "$name" in *.container) echo "${name%.container}" ;; esac
+      case "$name" in *.container) echo "${name%.container}" ;; *.socket) echo "$name" ;; esac
     else
       rm -f "$tmp"
     fi
@@ -126,6 +126,19 @@ port_holder() { # port
   line="$(ss -Hltnp "sport = :$1" 2>/dev/null || true)"
   [ -n "$line" ] || return 0
   printf '%s\n' "$line" | awk '{print $4, $NF}' | tr '\n' ' '
+}
+
+# Public ports are held by openthreat-nginx.socket (socket activation keeps
+# the client IPs). Start it before nginx; an nginx from an older unit that
+# published the ports itself must release them first.
+ensure_socket() { # [restart]  - "restart" after the socket definition changed
+  local sock=openthreat-nginx.socket
+  [ -f "$UNIT_DIR/$sock" ] || return 0      # commit without socket activation
+  systemctl --user enable "$sock" >/dev/null 2>&1 || true
+  if [ "${1:-}" = restart ] || ! systemctl --user is-active --quiet "$sock"; then
+    systemctl --user stop openthreat-nginx.service "$sock" 2>/dev/null || true
+    systemctl --user start "$sock"
+  fi
 }
 
 # ---------------------------------------------------------------- images
@@ -216,6 +229,9 @@ health_check() { # [timeout seconds]
     for u in "${ALL_UNITS[@]}"; do
       systemctl --user is-active --quiet "$u.service" || bad="$bad $u"
     done
+    if [ -f "$UNIT_DIR/openthreat-nginx.socket" ]; then
+      systemctl --user is-active --quiet openthreat-nginx.socket || bad="$bad openthreat-nginx.socket"
+    fi
     api="$(curl -sk -m 10 -o /dev/null -w '%{http_code}' "https://127.0.0.1:$HTTPS_PORT/health" || true)"
     web="$(curl -sk -m 10 -o /dev/null -w '%{http_code}' "https://127.0.0.1:$HTTPS_PORT/" || true)"
     if [ -z "$bad" ] && [ "$api" = 200 ] && [ "$web" = 200 ]; then
