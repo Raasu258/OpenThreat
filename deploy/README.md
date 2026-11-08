@@ -7,10 +7,10 @@
    └─ Actions: Images                           └─ deploy/deploy.sh
         audit, unit + smoke tests                    origin/main new? images sha-<commit> on GHCR?
         full-stack test (compose)                    (no → CI not done, next run)
-        push ghcr.io/<owner>/…:sha-<commit>          verified pg_dump backup
-   └─ Actions: Deploy test (deploy/** changes)       checkout, tag images :current (old → :previous)
-        install/migration, deploy, rollback,         render units, migrations
-        crash + reboot on a real systemd             restart app units, health check
+                                                     verified pg_dump backup
+        VPS deploy test (rootless Podman,            checkout, tag images :current (old → :previous)
+          install, deploy, rollback, crash)          render units, migrations
+        push ghcr.io/<owner>/…:sha-<commit>          restart app units, health check
                                                      failed → previous images + code
 ```
 

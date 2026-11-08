@@ -100,12 +100,32 @@ render_units() {
       rm -f "$tmp"
     fi
   done
-  # units removed from the repo
+  # Units no longer in the repo (removed, or rollback to an older commit) are
+  # stopped and deleted - a leftover unit can e.g. keep holding the ports.
   for dst in "$QUADLET_DIR"/openthreat* ; do
     [ -e "$dst" ] || continue
-    [ -e "$OT_REPO/deploy/quadlet/$(basename "$dst")" ] || { rm -f "$dst"; log "removed stale unit $(basename "$dst")"; }
+    name="$(basename "$dst")"
+    [ -e "$OT_REPO/deploy/quadlet/$name" ] && continue
+    case "$name" in *.container) systemctl --user stop "${name%.container}.service" 2>/dev/null || true ;; esac
+    rm -f "$dst"; log "removed stale unit $name" >&2
+  done
+  for dst in "$UNIT_DIR"/openthreat* ; do
+    [ -f "$dst" ] || continue
+    name="$(basename "$dst")"
+    [ -e "$OT_REPO/deploy/systemd/$name" ] && continue
+    systemctl --user disable --now "$name" >/dev/null 2>&1 || true
+    rm -f "$dst"; log "removed stale unit $name" >&2
   done
   systemctl --user daemon-reload
+}
+
+# Who listens on a TCP port ("" if free). Without sudo, ss only names our
+# own processes - a listener without a name belongs to systemd or another user.
+port_holder() { # port
+  local line
+  line="$(ss -Hltnp "sport = :$1" 2>/dev/null || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "$line" | awk '{print $4, $NF}' | tr '\n' ' '
 }
 
 # ---------------------------------------------------------------- images
