@@ -156,8 +156,14 @@ backup_db() { # container-name label
   LAST_BACKUP="$file"
   log "backup: $file ($(du -h "$file" | cut -f1))"
   # keep the newest $BACKUP_KEEP dumps (pre-quadlet migration dump is kept separately)
-  ls -1t "$BACKUP_DIR"/openthreat-*.dump 2>/dev/null | grep -v -- '-pre-quadlet' \
-    | tail -n +"$((BACKUP_KEEP + 1))" | xargs -r rm -f
+  # (glob + loop instead of ls|grep: no pipefail false negatives)
+  local f n=0
+  for f in $(ls -1t "$BACKUP_DIR"/openthreat-*.dump 2>/dev/null || true); do
+    case "$f" in *-pre-quadlet.dump) continue ;; esac
+    n=$((n + 1))
+    [ "$n" -le "$BACKUP_KEEP" ] || rm -f "$f"
+  done
+  return 0
 }
 
 db_count() { # container -> number of CVEs (or "?")
