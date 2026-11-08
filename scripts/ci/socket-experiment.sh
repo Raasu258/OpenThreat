@@ -1,62 +1,60 @@
 #!/usr/bin/env bash
-# Experiment: which part of nginx socket activation hangs?
+# Experiment 2: our real nginx.conf (as in #35) with socket activation.
 set -uo pipefail
 export XDG_RUNTIME_DIR="/run/user/$(id -u)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+SRC="$(cd "$(dirname "$0")/../.." && pwd)"
 Q="$HOME/.config/containers/systemd"; U="$HOME/.config/systemd/user"; C="$HOME/exp"
-mkdir -p "$Q" "$U" "$C"
+mkdir -p "$Q" "$U" "$C/ssl"
 podman pull -q docker.io/library/nginx:alpine >/dev/null
 podman network create --subnet 10.91.99.0/24 expnet >/dev/null
+openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj /CN=x -keyout "$C/ssl/nginx.key" -out "$C/ssl/nginx.crt" 2>/dev/null
+cp "$SRC/scripts/ci/exp-nginx.conf.template" "$C/nginx.conf"
 
-conf() { # name, listen-http, [listen-https]
-  cat > "$C/$1.conf" <<EOF
+# dummy backend + frontend (answer 200 on 8001 and 3000)
+cat > "$C/dummy.conf" <<'EOF'
 events {}
-error_log stderr info;
-http {
-  access_log /dev/stdout;
-  server { listen $2; return 200 "ok $1 from \$remote_addr\n"; }
+http { server { listen 8001; listen 3000; location / { return 200 "dummy $remote_addr xff=$http_x_forwarded_for xri=$http_x_real_ip\n"; } } }
 EOF
-  if [ -n "${3:-}" ]; then cat >> "$C/$1.conf" <<EOF
-  server { listen $3 ssl; ssl_certificate /c/t.crt; ssl_certificate_key /c/t.key; return 200 "ok-tls $1 from \$remote_addr\n"; }
-EOF
-  fi
-  echo "}" >> "$C/$1.conf"
-}
-openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj /CN=x -keyout "$C/t.key" -out "$C/t.crt" 2>/dev/null
+podman run -d --name dummy --network expnet --ip 10.91.99.20 --network-alias backend --network-alias frontend \
+  -v "$C/dummy.conf:/etc/nginx/nginx.conf:ro" docker.io/library/nginx:alpine >/dev/null
 
-variant() { # name port1 [port2] -- extra [Container] lines...
-  local n="$1" p1="$2" p2="$3"; shift 3
-  printf '[Socket]\nListenStream=0.0.0.0:%s\n' "$p1" > "$U/exp-$n.socket"
-  [ -n "$p2" ] && printf 'ListenStream=0.0.0.0:%s\n' "$p2" >> "$U/exp-$n.socket"
-  { printf '[Unit]\nRequires=exp-%s.socket\nAfter=exp-%s.socket\n[Container]\nImage=docker.io/library/nginx:alpine\nContainerName=exp-%s\n' "$n" "$n" "$n"
-    printf 'Volume=%s/%s.conf:/etc/nginx/nginx.conf:ro\nVolume=%s:/c:ro\n' "$C" "$n" "$C"
+run_variant() { # name http-port https-port mode(socket|publish) extra-lines...
+  local n="$1" hp="$2" sp="$3" mode="$4"; shift 4
+  { printf '[Unit]\n'
+    [ "$mode" = socket ] && printf 'Requires=exp-%s.socket\nAfter=exp-%s.socket\n' "$n" "$n"
+    printf '[Container]\nImage=docker.io/library/nginx:alpine\nContainerName=exp-%s\nNetwork=expnet\n' "$n"
+    printf 'Volume=%s/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro\nVolume=%s/ssl:/etc/nginx/ssl:ro\n' "$C" "$C"
+    printf 'Environment=NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx NGINX_ENVSUBST_FILTER=^NGINX_PUBLIC_ NGINX_PUBLIC_HTTPS_PORT=%s\n' "$sp"
+    if [ "$mode" = socket ]; then
+      printf 'Environment=NGINX=3;4;\nEnvironment=NGINX_PUBLIC_HTTP_LISTEN=0.0.0.0:%s NGINX_PUBLIC_HTTPS_LISTEN=0.0.0.0:%s\n' "$hp" "$sp"
+    else
+      printf 'Environment=NGINX_PUBLIC_HTTP_LISTEN=80 NGINX_PUBLIC_HTTPS_LISTEN=443\nPublishPort=%s:80\nPublishPort=%s:443\n' "$hp" "$sp"
+    fi
     for l in "$@"; do printf '%s\n' "$l"; done; } > "$Q/exp-$n.container"
+  [ "$mode" = socket ] && printf '[Socket]\nListenStream=0.0.0.0:%s\nListenStream=0.0.0.0:%s\n' "$hp" "$sp" > "$U/exp-$n.socket"
 }
-
-conf none   0.0.0.0:18101
-conf bridge 0.0.0.0:18102
-conf both   0.0.0.0:18103 0.0.0.0:18104
-conf tpl    0.0.0.0:18105
-variant none   18101 "" 'Network=none' 'Environment=NGINX=3;'
-variant bridge 18102 "" 'Network=expnet' 'Environment=NGINX=3;'
-variant both   18103 18104 'Network=expnet' 'IP=10.91.99.30' 'Environment=NGINX=3;4;'
-# exactly like ours: entrypoint renders a template, env from Environment=
-variant tpl    18105 "" 'Network=expnet' 'Environment=NGINX=3;' 'Environment=NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx NGINX_ENVSUBST_FILTER=^NGINX_PUBLIC_'
-sed -i "s#Volume=$C/tpl.conf:/etc/nginx/nginx.conf:ro#Volume=$C/tpl.conf:/etc/nginx/templates/nginx.conf.template:ro#" "$Q/exp-tpl.container"
+run_variant publish 18201 18202 publish
+run_variant socket  18211 18212 socket
+# same, but error log at info to see where the master stops
+run_variant socketdbg 18221 18222 socket
+sed 's#^error_log .*#error_log stderr info;#' "$C/nginx.conf" > "$C/nginx-dbg.conf"
+sed -i "s#$C/nginx.conf:#$C/nginx-dbg.conf:#" "$Q/exp-socketdbg.container"
 
 systemctl --user daemon-reload
-for n in none bridge both tpl; do systemctl --user start "exp-$n.socket"; done
-sleep 2
-try() { echo "--- $1: $(curl -sk -m 5 "$2" 2>&1 || echo "FAILED rc=$?")"; }
-try none   http://127.0.0.1:18101/
-try bridge http://127.0.0.1:18102/
-try both-http  http://127.0.0.1:18103/
-try both-https https://127.0.0.1:18104/
-try tpl    http://127.0.0.1:18105/
-sleep 2
-for n in none bridge both tpl; do
-  echo "===== $n: unit + log"
-  systemctl --user status "exp-$n.service" --no-pager -n 0 | head -4
-  journalctl --user -u "exp-$n.service" --no-pager -n 25 | cut -c1-220
+systemctl --user start exp-publish.service exp-socket.socket exp-socketdbg.socket
+sleep 3
+try() { echo "--- $1: $(curl -sk -m 8 -o /dev/stdout -w ' [%{http_code}]' "$2" 2>&1 | tr '\n' ' ' || echo "FAILED rc=$?")"; }
+for v in "publish 18201 18202" "socket 18211 18212" "socketdbg 18221 18222"; do
+  set -- $v
+  try "$1 http"         "http://127.0.0.1:$2/x"
+  try "$1 https /health" "https://127.0.0.1:$3/health"
+  try "$1 https /"       "https://127.0.0.1:$3/"
 done
-echo "===== generated ExecStart (both)"
-/usr/libexec/podman/quadlet -dryrun -user 2>/dev/null | sed -n '/---exp-both.service---/,/^---/p' | grep ExecStart
+sleep 2
+for n in socket socketdbg; do
+  echo "===== $n"
+  systemctl --user status "exp-$n.service" --no-pager -n 0 | sed -n 1,4p
+  journalctl --user -u "exp-$n.service" --no-pager -n 40 | grep -v "docker-entrypoint\|podman\[" | cut -c40-260
+done
+echo "===== inside socketdbg"
+podman exec exp-socketdbg sh -c 'ls -l /proc/1/fd; cat /etc/nginx/nginx.conf | grep -n listen; ps' 2>&1 | head -30
