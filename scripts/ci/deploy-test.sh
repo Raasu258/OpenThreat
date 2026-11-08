@@ -159,7 +159,7 @@ echo "== nothing new -> no-op"
 deploy/deploy.sh
 expect "still A" "$A" "$(cat "$STATE/deployed")"
 
-curl -sk -o /dev/null "$B/health?from-test-A"
+curl -sk -o /dev/null "$B/?from-test-A"      # /health is not logged (access_log off)
 echo "client address nginx logs with published ports: $(podman logs --tail 50 openthreat-nginx 2>&1 | awk '/from-test-A/ {print $1}' | tail -n1)"
 
 echo "== 2. new commit B (socket activation), CI not done yet -> waits"
@@ -184,7 +184,8 @@ expect "stale units removed" 0 "$(ls "$HOME"/.config/systemd/user/openthreat-sta
 expect "its port released" 0 "$(ss -Hltn 'sport = :18099' | wc -l)"
 expect "backup before deploy" 1 "$(find "$W/backups" -name "*-${Bc:0:12}.dump" | wc -l)"
 expect "public ports held by systemd socket" active "$(systemctl --user is-active openthreat-nginx.socket)"
-curl -sk -o /dev/null "$B/health?from-test-B"
+curl -sk -o /dev/null "$B/?from-test-B"         # logged by nginx (/health is not)
+curl -sk -o /dev/null "$B/health?from-test-B"   # reaches the backend
 sleep 1
 expect "nginx logs the real client address" 127.0.0.1 \
   "$(podman logs --tail 50 openthreat-nginx 2>&1 | awk '/from-test-B/ {print $1}' | tail -n1)"
