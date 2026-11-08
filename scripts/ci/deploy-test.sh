@@ -114,6 +114,10 @@ podman run -d --name openthreat_postgres_1 "${L[@]}" --label com.docker.compose.
   -v openthreat_postgres_data:/var/lib/postgresql/data docker.io/library/postgres:16-alpine >/dev/null
 podman run -d --name openthreat_redis_1 "${L[@]}" --label com.docker.compose.service=redis \
   --network ot_compose docker.io/library/redis:7-alpine >/dev/null
+# podman-compose turns depends_on into --requires: removal order matters
+podman run -d --name openthreat_backend_1 "${L[@]}" --label com.docker.compose.service=backend \
+  --requires openthreat_postgres_1,openthreat_redis_1 --network ot_compose \
+  docker.io/library/redis:7-alpine >/dev/null
 wait_for 60 podman exec openthreat_postgres_1 pg_isready -U openthreat -h 127.0.0.1 >/dev/null
 podman pull -q "$REG/openthreat-backend:sha-$A" >/dev/null
 APPENV=(-e "DATABASE_URL=postgresql://openthreat:$PGPW@postgres:5432/openthreat" -e REDIS_URL=redis://x:6379 -e "SECRET_KEY=$(openssl rand -hex 32)")
