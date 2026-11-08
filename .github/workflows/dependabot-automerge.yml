@@ -1,14 +1,21 @@
 # Auto-merge Dependabot PRs once the full Images pipeline passed on them.
 #
-# Runs after "Images" finishes for a Dependabot pull request, from the
-# default branch (trusted code; the PR's code is never checked out here).
+# Runs from the default branch (trusted code; the PR's code is never checked
+# out here) - logic in scripts/ci/dependabot_automerge.sh:
 #   patch / minor  -> squash-merge, then build + publish images on main
 #   major/unknown  -> label "dependabot:manual-review" + one comment
 # Add the label "no-automerge" to a PR to opt it out.
 #
+# Triggers:
+#   workflow_run   right after Images finishes on a Dependabot PR
+#   schedule       sweep of all open Dependabot PRs - catches runs that
+#                  workflow_run missed (e.g. CI finished before this file
+#                  was on main, or a merge failed because main moved)
+#   manual         Actions -> Dependabot auto-merge -> Run workflow (sweep)
+#
 # Why not `gh pr merge --auto`: merges made with GITHUB_TOKEN don't trigger
 # workflows, so main would never get new images. workflow_dispatch is the
-# documented exception, so this workflow starts the main build itself.
+# documented exception, so the script starts the main build itself.
 
 name: Dependabot auto-merge
 
@@ -16,6 +23,9 @@ on:
   workflow_run:
     workflows: [Images]
     types: [completed]
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,72 +37,36 @@ concurrency:
 jobs:
   automerge:
     if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.actor.login == 'dependabot[bot]'
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.actor.login == 'dependabot[bot]'
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: write      # merge
       pull-requests: write # label, comment
-      actions: write       # dispatch images.yml on main
+      actions: write       # read CI runs, dispatch images.yml on main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Merge if eligible
+      - name: Merge eligible PRs
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+          EVENT: ${{ github.event_name }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-
-          pr="$(gh api "repos/$REPO/pulls?state=open&head=$OWNER:$HEAD_BRANCH" --jq '.[0].number // empty')"
-          if [ -z "$pr" ]; then echo "no open PR for $HEAD_BRANCH"; exit 0; fi
-          gh api "repos/$REPO/pulls/$pr" > pr.json
-
-          author="$(jq -r .user.login pr.json)"
-          base="$(jq -r .base.ref pr.json)"
-          sha="$(jq -r .head.sha pr.json)"
-          labels="$(jq -r '[.labels[].name] | join(",")' pr.json)"
-          echo "PR #$pr by $author -> $base, head $sha, labels: $labels"
-
-          if [ "$author" != "dependabot[bot]" ] || [ "$base" != "$DEFAULT_BRANCH" ]; then
-            echo "not a Dependabot PR into $DEFAULT_BRANCH"; exit 0
+          if [ "$EVENT" = workflow_run ]; then
+            pr="$(gh api "repos/$REPO/pulls?state=open&head=$OWNER:$HEAD_BRANCH" --jq '.[0].number // empty')"
+            if [ -z "$pr" ]; then echo "no open PR for $HEAD_BRANCH"; exit 0; fi
+            scripts/ci/dependabot_automerge.sh "$pr" "$HEAD_SHA"
+          else
+            scripts/ci/dependabot_automerge.sh --sweep
           fi
-          if [ "$sha" != "$HEAD_SHA" ]; then
-            echo "PR moved on since this run ($HEAD_SHA); the newer run decides"; exit 0
-          fi
-          case ",$labels," in *,no-automerge,*) echo "opted out via label"; exit 0 ;; esac
-
-          others="$(gh api "repos/$REPO/pulls/$pr/commits" --jq '[.[] | select(.author.login != "dependabot[bot]")] | length')"
-          if [ "$others" != 0 ]; then
-            echo "PR contains commits not made by Dependabot - leaving it for review"; exit 0
-          fi
-
-          kind="$(jq -r .body pr.json | python3 scripts/ci/dependabot_update_type.py)"
-          echo "update type: $kind"
-
-          case "$kind" in
-            patch|minor)
-              gh api -X PUT "repos/$REPO/pulls/$pr/merge" \
-                -f merge_method=squash -f sha="$sha" --jq .message
-              # GITHUB_TOKEN merges don't trigger push workflows -> build main explicitly
-              gh api -X POST "repos/$REPO/actions/workflows/images.yml/dispatches" -f ref="$DEFAULT_BRANCH"
-              echo "### Merged #$pr ($kind) and started Images on $DEFAULT_BRANCH" >> "$GITHUB_STEP_SUMMARY"
-              ;;
-            *)
-              case ",$labels," in
-                *,dependabot:manual-review,*) ;;
-                *)
-                  gh api "repos/$REPO/issues/$pr/labels" -f "labels[]=dependabot:manual-review" >/dev/null
-                  gh api "repos/$REPO/issues/$pr/comments" -f body="CI passed, but this is a **$kind** update, so it is not merged automatically. Review the changelog, then merge by hand (the VPS deploys it after the main build)." >/dev/null
-                  ;;
-              esac
-              echo "### #$pr left for review ($kind)" >> "$GITHUB_STEP_SUMMARY"
-              ;;
-          esac
