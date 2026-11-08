@@ -13,6 +13,12 @@ Network=openthreat.network
 IP=@SUBNET@.21
 PodmanArgs=--network-alias=frontend --memory=512m --cpus=1
 Environment=NODE_ENV=production API_URL=http://backend:8001
+# Defined here, not taken from the image (see openthreat-backend.container)
+HealthCmd=node -e "require('http').get('http://127.0.0.1:3000', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=60s
 HealthOnFailure=kill
 Notify=healthy
 

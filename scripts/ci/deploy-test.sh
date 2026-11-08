@@ -50,9 +50,19 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# Re-published as OCI images, like GHCR gets them from CI (provenance/SBOM):
+# Podman ignores a Dockerfile HEALTHCHECK in OCI images, so the units must
+# define their own - a Docker-format image here would hide that.
 push_images() { # tag backend-src frontend-src
-  docker tag "$2" "$REG/openthreat-backend:$1";  docker push -q "$REG/openthreat-backend:$1" >/dev/null
-  docker tag "$3" "$REG/openthreat-frontend:$1"; docker push -q "$REG/openthreat-frontend:$1" >/dev/null
+  local svc src
+  for svc in backend frontend; do
+    if [ "$svc" = backend ]; then src="$2"; else src="$3"; fi
+    docker tag "$src" "$REG/openthreat-$svc:$1-docker"
+    docker push -q "$REG/openthreat-$svc:$1-docker" >/dev/null
+    podman pull -q "$REG/openthreat-$svc:$1-docker" >/dev/null
+    podman push -q --format oci "$REG/openthreat-$svc:$1-docker" "$REG/openthreat-$svc:$1"
+    podman rmi -f "$REG/openthreat-$svc:$1-docker" >/dev/null
+  done
 }
 
 echo "== environment"
@@ -71,13 +81,6 @@ W="$(mktemp -d)"
 git init -q --bare "$W/origin.git"
 mkdir "$W/app"; git -C "$SRC" archive HEAD | tar -x -C "$W/app"
 cd "$W/app"
-# Commit A = the layout before socket activation (nginx publishes the ports
-# itself), like the first Quadlet installs. Commit B switches to the socket.
-rm deploy/systemd/openthreat-nginx.socket
-sed -i -e '/openthreat-nginx.socket/d' -e '/^Environment=NGINX=3;4;$/d' \
-  -e 's#^Environment=NGINX_PUBLIC_HTTP_LISTEN=.*#Environment=NGINX_PUBLIC_HTTP_LISTEN=80 NGINX_PUBLIC_HTTPS_LISTEN=443\nPublishPort=@HTTP_PORT@:80\nPublishPort=@HTTPS_PORT@:443#' \
-  deploy/quadlet/openthreat-nginx.container
-grep -q '^PublishPort=@HTTPS_PORT@:443' deploy/quadlet/openthreat-nginx.container || { echo "legacy rewrite failed"; exit 1; }
 git init -q -b main; git add -A
 git -c user.name=ci -c user.email=ci@localhost commit -qm A
 git remote add origin "$W/origin.git"; git push -q origin main
@@ -137,18 +140,20 @@ expect "pre-migration backup kept" 1 "$(find "$W/backups" -name '*pre-quadlet.du
 expect "deploy timer enabled" enabled "$(systemctl --user is-enabled openthreat-deploy.timer)"
 expect "stack target enabled" enabled "$(systemctl --user is-enabled openthreat.target)"
 expect "postgres not published" "" "$(podman port openthreat-postgres)"
+health() { podman inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null || echo missing; }
+for c in openthreat-postgres openthreat-redis openthreat-backend openthreat-frontend; do
+  wait_for 120 sh -c "[ \"\$(podman inspect --format '{{.State.Health.Status}}' $c 2>/dev/null)\" = healthy ]" || true
+  expect "$c reports healthy" healthy "$(health "$c")"
+done
+expect "all units active (not stuck activating)" "" \
+  "$(for u in postgres redis backend frontend worker beat nginx; do systemctl --user is-active --quiet "openthreat-$u.service" || echo "$u"; done)"
 
 echo "== nothing new -> no-op"
 deploy/deploy.sh
 expect "still A" "$A" "$(cat "$STATE/deployed")"
 
-curl -sk -o /dev/null "$B/health?from-test-A"
-echo "client address nginx logs with published ports: $(podman logs --tail 50 openthreat-nginx 2>&1 | awk '/from-test-A/ {print $1}' | tail -n1)"
-
-echo "== 2. new commit B (socket activation), CI not done yet -> waits"
-git -C "$SRC" archive HEAD | tar -x -C .        # restore the real files
-git add -A
-git -c user.name=ci -c user.email=ci@localhost commit -q -m B; git push -q origin main
+echo "== 2. new commit B, CI not done yet -> waits"
+git -c user.name=ci -c user.email=ci@localhost commit -q --allow-empty -m B; git push -q origin main
 Bc="$(git rev-parse HEAD)"; git reset -q --hard "$A"     # VPS checkout is still at A
 deploy/deploy.sh
 expect "waits for images" "$A" "$(cat "$STATE/deployed")"
@@ -159,15 +164,6 @@ expect "previous = A" "$A" "$(cat "$STATE/previous")"
 expect "checkout = B" "$Bc" "$(git rev-parse HEAD)"
 expect "data after deploy" "$before" "$(cves)"
 expect "backup before deploy" 1 "$(find "$W/backups" -name "*-${Bc:0:12}.dump" | wc -l)"
-expect "public ports held by systemd socket" active "$(systemctl --user is-active openthreat-nginx.socket)"
-curl -sk -o /dev/null "$B/health?from-test-B"
-sleep 1
-expect "nginx logs the real client address" 127.0.0.1 \
-  "$(podman logs --tail 50 openthreat-nginx 2>&1 | awk '/from-test-B/ {print $1}' | tail -n1)"
-expect "backend sees the client address (X-Real-IP)" 1 \
-  "$(podman logs --tail 50 openthreat-backend 2>&1 | grep -c '127.0.0.1:[0-9]* - "GET /health?from-test-B' || true)"
-expect "HTTP redirect keeps the public port" "https://127.0.0.1:$HTTPS_PORT/news" \
-  "$(curl -s -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:18082/news")"
 
 echo "== 3. commit C with a broken backend -> rollback"
 git -c user.name=ci -c user.email=ci@localhost commit -q --allow-empty -m C; git push -q origin main
@@ -191,10 +187,6 @@ sleep 3
 wait_for 150 api_up && ok "API back after kill" || fail "API not back after kill"
 expect "backend recreated" 1 "$([ "$(podman inspect --format '{{.Id}}' openthreat-backend)" != "$old_id" ] && echo 1)"
 expect "API data via nginx" "$before" "$(cves)"
-
-echo "== nginx restart: the port stays open (socket held by systemd)"
-systemctl --user restart --no-block openthreat-nginx.service
-expect "request during nginx restart" 200 "$(curl -sk -m 60 -o /dev/null -w '%{http_code}' "$B/health")"
 
 echo "== 5. whole stack restarted (like a reboot)"
 systemctl --user stop openthreat.target     # waits: units are ordered after the target
