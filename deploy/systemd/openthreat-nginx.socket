@@ -1,0 +1,15 @@
+# Public ports of OpenThreat, opened by systemd and handed to nginx
+# (socket activation). nginx accepts the connections itself, so it sees the
+# real client address - rootless Podman port publishing would hide it.
+# The ports stay open while nginx restarts: clients wait instead of failing.
+[Unit]
+Description=OpenThreat public ports (HTTP + HTTPS)
+
+[Socket]
+# Order matters: fd 3 = HTTP, fd 4 = HTTPS (NGINX=3;4; in the container)
+ListenStream=0.0.0.0:@HTTP_PORT@
+ListenStream=0.0.0.0:@HTTPS_PORT@
+Service=openthreat-nginx.service
+
+[Install]
+WantedBy=sockets.target

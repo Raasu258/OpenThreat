@@ -81,6 +81,13 @@ W="$(mktemp -d)"
 git init -q --bare "$W/origin.git"
 mkdir "$W/app"; git -C "$SRC" archive HEAD | tar -x -C "$W/app"
 cd "$W/app"
+# Commit A = the layout before socket activation (nginx publishes the ports
+# itself), like the first Quadlet installs. Commit B switches to the socket.
+rm deploy/systemd/openthreat-nginx.socket
+sed -i -e '/openthreat-nginx.socket/d' -e '/^Environment=NGINX=3;4;$/d' \
+  -e 's#^Environment=NGINX_PUBLIC_HTTP_LISTEN=.*#Environment=NGINX_PUBLIC_HTTP_LISTEN=80 NGINX_PUBLIC_HTTPS_LISTEN=443\nPublishPort=@HTTP_PORT@:80\nPublishPort=@HTTPS_PORT@:443#' \
+  deploy/quadlet/openthreat-nginx.container
+grep -q '^PublishPort=@HTTPS_PORT@:443' deploy/quadlet/openthreat-nginx.container || { echo "legacy rewrite failed"; exit 1; }
 git init -q -b main; git add -A
 git -c user.name=ci -c user.email=ci@localhost commit -qm A
 git remote add origin "$W/origin.git"; git push -q origin main
@@ -152,18 +159,40 @@ echo "== nothing new -> no-op"
 deploy/deploy.sh
 expect "still A" "$A" "$(cat "$STATE/deployed")"
 
-echo "== 2. new commit B, CI not done yet -> waits"
-git -c user.name=ci -c user.email=ci@localhost commit -q --allow-empty -m B; git push -q origin main
+curl -sk -o /dev/null "$B/?from-test-A"      # /health is not logged (access_log off)
+echo "client address nginx logs with published ports: $(podman logs --tail 50 openthreat-nginx 2>&1 | awk '/from-test-A/ {print $1}' | tail -n1)"
+
+echo "== 2. new commit B (socket activation), CI not done yet -> waits"
+git -C "$SRC" archive HEAD | tar -x -C .        # restore the real files
+git add -A
+git -c user.name=ci -c user.email=ci@localhost commit -q -m B; git push -q origin main
 Bc="$(git rev-parse HEAD)"; git reset -q --hard "$A"     # VPS checkout is still at A
 deploy/deploy.sh
 expect "waits for images" "$A" "$(cat "$STATE/deployed")"
 push_images "sha-$Bc" "$SRC_BACKEND_IMAGE" "$SRC_FRONTEND_IMAGE"
+# a unit that is no longer in the repo still holds a port (happened on the VPS)
+printf '[Socket]\nListenStream=0.0.0.0:18099\n' > "$HOME/.config/systemd/user/openthreat-stale.socket"
+printf '[Service]\nExecStart=/bin/sleep infinity\n' > "$HOME/.config/systemd/user/openthreat-stale.service"
+systemctl --user daemon-reload; systemctl --user start openthreat-stale.socket
+expect "stale socket holds its port" 1 "$(ss -Hltn 'sport = :18099' | wc -l)"
 deploy/deploy.sh
 expect "deployed = B" "$Bc" "$(cat "$STATE/deployed")"
 expect "previous = A" "$A" "$(cat "$STATE/previous")"
 expect "checkout = B" "$Bc" "$(git rev-parse HEAD)"
 expect "data after deploy" "$before" "$(cves)"
+expect "stale units removed" 0 "$(ls "$HOME"/.config/systemd/user/openthreat-stale.* 2>/dev/null | wc -l)"
+expect "its port released" 0 "$(ss -Hltn 'sport = :18099' | wc -l)"
 expect "backup before deploy" 1 "$(find "$W/backups" -name "*-${Bc:0:12}.dump" | wc -l)"
+expect "public ports held by systemd socket" active "$(systemctl --user is-active openthreat-nginx.socket)"
+curl -sk -o /dev/null "$B/?from-test-B"         # logged by nginx (/health is not)
+curl -sk -o /dev/null "$B/health?from-test-B"   # reaches the backend
+sleep 1
+expect "nginx logs the real client address" 127.0.0.1 \
+  "$(podman logs --tail 50 openthreat-nginx 2>&1 | awk '/from-test-B/ {print $1}' | tail -n1)"
+expect "backend sees the client address (X-Real-IP)" 1 \
+  "$(podman logs --tail 50 openthreat-backend 2>&1 | grep -c '127.0.0.1:[0-9]* - "GET /health?from-test-B' || true)"
+expect "HTTP redirect keeps the public port" "https://127.0.0.1:$HTTPS_PORT/news" \
+  "$(curl -s -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:18082/news")"
 
 echo "== 3. commit C with a broken backend -> rollback"
 git -c user.name=ci -c user.email=ci@localhost commit -q --allow-empty -m C; git push -q origin main
@@ -187,6 +216,10 @@ sleep 3
 wait_for 150 api_up && ok "API back after kill" || fail "API not back after kill"
 expect "backend recreated" 1 "$([ "$(podman inspect --format '{{.Id}}' openthreat-backend)" != "$old_id" ] && echo 1)"
 expect "API data via nginx" "$before" "$(cves)"
+
+echo "== nginx restart: the port stays open (socket held by systemd)"
+systemctl --user restart --no-block openthreat-nginx.service
+expect "request during nginx restart" 200 "$(curl -sk -m 60 -o /dev/null -w '%{http_code}' "$B/health")"
 
 echo "== 5. whole stack restarted (like a reboot)"
 systemctl --user stop openthreat.target     # waits: units are ordered after the target
