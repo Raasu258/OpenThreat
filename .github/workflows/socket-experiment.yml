@@ -1,0 +1,21 @@
+name: Socket experiment
+on:
+  pull_request:
+    paths: [scripts/ci/socket-experiment.sh, .github/workflows/socket-experiment.yml]
+permissions:
+  contents: read
+jobs:
+  exp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get install -y -q podman netavark aardvark-dns slirp4netns uidmap >/dev/null
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" podman system migrate
+      - run: scripts/ci/socket-experiment.sh
