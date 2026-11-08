@@ -47,11 +47,16 @@ mk noepoll  1833 -e '/use epoll;/d'
 mk mutex    1834 -e 's#multi_accept on;#multi_accept on; accept_mutex on;#'
 mk nouser   1835 -e '/^user nginx;/d'
 mk w1mutex  1836 -e 's#^worker_processes auto;#worker_processes 2;#' -e 's#multi_accept on;#multi_accept on; accept_mutex on;#'
+# hypothesis: systemd sockets are blocking; nginx + multi_accept blocks in accept()
+mk nonblock 1837 -e 's#^error_log .*#error_log stderr info;#'
+sed -i 's#^\[Socket\]#[Socket]\nNonBlocking=yes#' "$U/exp-nonblock.socket"
+cat "$U/exp-nonblock.socket"
 systemctl --user daemon-reload
-for n in asis w1 nomulti noepoll mutex nouser w1mutex; do systemctl --user start "exp-$n.socket"; done
+for n in asis w1 nomulti noepoll mutex nouser w1mutex nonblock; do systemctl --user start "exp-$n.socket"; done
 sleep 3
-for v in "asis 1830" "w1 1831" "nomulti 1832" "noepoll 1833" "mutex 1834" "nouser 1835" "w1mutex 1836"; do
+for v in "asis 1830" "w1 1831" "nomulti 1832" "noepoll 1833" "mutex 1834" "nouser 1835" "w1mutex 1836" "nonblock 1837"; do
   set -- $v
+  for _ in 1 2 3; do curl -sk -m 3 -o /dev/null "https://127.0.0.1:${2}2/" || true; done
   echo "--- $1: http=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${2}1/x") https=$(curl -sk -m 6 -o /dev/null -w '%{http_code}' "https://127.0.0.1:${2}2/health")"
 done
 echo "===== asis log"
