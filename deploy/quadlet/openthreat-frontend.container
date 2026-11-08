@@ -1,6 +1,8 @@
 [Unit]
 Description=OpenThreat web frontend (Next.js)
 PartOf=openthreat.target
+# ordered after the target: "systemctl stop openthreat.target" waits until this is down
+After=openthreat.target
 Wants=openthreat-backend.service
 After=openthreat-backend.service
 

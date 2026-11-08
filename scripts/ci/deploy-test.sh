@@ -168,8 +168,8 @@ expect "backend recreated" 1 "$([ "$(podman inspect --format '{{.Id}}' openthrea
 expect "API data via nginx" "$before" "$(cves)"
 
 echo "== 5. whole stack restarted (like a reboot)"
-systemctl --user stop openthreat.target
-expect "everything stopped" "" "$(podman ps -q --filter name=openthreat-)"
+systemctl --user stop openthreat.target     # waits: units are ordered after the target
+expect "everything stopped when stop returns" "" "$(podman ps -q --filter name=openthreat-)"
 systemctl --user start openthreat.target
 wait_for 240 api_up && ok "stack back after restart" || fail "stack not back after restart"
 expect "data after restart" "$before" "$(cves)"
