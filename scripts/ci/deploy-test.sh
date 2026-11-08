@@ -160,6 +160,7 @@ expect "waits for images" "$A" "$(cat "$STATE/deployed")"
 push_images "sha-$Bc" "$SRC_BACKEND_IMAGE" "$SRC_FRONTEND_IMAGE"
 # a unit that is no longer in the repo still holds a port (happened on the VPS)
 printf '[Socket]\nListenStream=0.0.0.0:18099\n' > "$HOME/.config/systemd/user/openthreat-stale.socket"
+printf '[Service]\nExecStart=/bin/sleep infinity\n' > "$HOME/.config/systemd/user/openthreat-stale.service"
 systemctl --user daemon-reload; systemctl --user start openthreat-stale.socket
 expect "stale socket holds its port" 1 "$(ss -Hltn 'sport = :18099' | wc -l)"
 deploy/deploy.sh
@@ -167,7 +168,7 @@ expect "deployed = B" "$Bc" "$(cat "$STATE/deployed")"
 expect "previous = A" "$A" "$(cat "$STATE/previous")"
 expect "checkout = B" "$Bc" "$(git rev-parse HEAD)"
 expect "data after deploy" "$before" "$(cves)"
-expect "stale unit removed" 0 "$(ls "$HOME/.config/systemd/user/openthreat-stale.socket" 2>/dev/null | wc -l)"
+expect "stale units removed" 0 "$(ls "$HOME"/.config/systemd/user/openthreat-stale.* 2>/dev/null | wc -l)"
 expect "its port released" 0 "$(ss -Hltn 'sport = :18099' | wc -l)"
 expect "backup before deploy" 1 "$(find "$W/backups" -name "*-${Bc:0:12}.dump" | wc -l)"
 
