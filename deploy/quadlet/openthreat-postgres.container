@@ -1,0 +1,33 @@
+[Unit]
+Description=OpenThreat PostgreSQL
+PartOf=openthreat.target
+
+[Container]
+ContainerName=openthreat-postgres
+# Keep the major version: the data directory was initialised with 16.
+Image=docker.io/library/postgres:16-alpine
+AutoUpdate=registry
+Network=openthreat.network
+IP=@SUBNET@.10
+PodmanArgs=--network-alias=postgres --memory=1g --cpus=1
+Volume=openthreat-db.volume:/var/lib/postgresql/data
+EnvironmentFile=@STATE@/db.env
+Exec=postgres -c shared_buffers=256MB -c effective_cache_size=768MB -c maintenance_work_mem=128MB -c max_connections=100 -c random_page_cost=1.1 -c effective_io_concurrency=200
+# pg_isready only checks that the server accepts connections (no login).
+# Over TCP, so the init-time socket-only server doesn't count as ready.
+HealthCmd=pg_isready -h 127.0.0.1 -p 5432
+HealthInterval=10s
+HealthRetries=10
+HealthStartPeriod=30s
+# "started" = accepting connections, so dependents never race the DB
+Notify=healthy
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+# Give Postgres time for a clean shutdown (checkpoint) on stop/reboot
+TimeoutStopSec=120
+
+[Install]
+WantedBy=openthreat.target

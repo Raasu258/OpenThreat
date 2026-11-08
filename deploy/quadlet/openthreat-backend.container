@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenThreat API (FastAPI)
+PartOf=openthreat.target
+Requires=openthreat-postgres.service openthreat-redis.service
+After=openthreat-postgres.service openthreat-redis.service
+
+[Container]
+ContainerName=openthreat-backend
+# Tagged by deploy/deploy.sh: :current = deployed commit, :previous = rollback
+Image=localhost/openthreat-backend:current
+Network=openthreat.network
+IP=@SUBNET@.20
+PodmanArgs=--network-alias=backend --memory=1g --cpus=1
+EnvironmentFile=@STATE@/app.env
+# Health check comes from the image (GET /health). Hung -> killed -> restarted.
+HealthOnFailure=kill
+Notify=healthy
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=openthreat.target

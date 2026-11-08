@@ -1,0 +1,7 @@
+# Private network for the stack. Fixed subnet + fixed container IPs: nginx
+# resolves its upstreams once at start, so backend/frontend must keep their
+# address when systemd recreates them.
+[Network]
+NetworkName=openthreat
+Subnet=@SUBNET@.0/24
+Gateway=@SUBNET@.1

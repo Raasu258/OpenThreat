@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenThreat Celery worker
+PartOf=openthreat.target
+Requires=openthreat-postgres.service openthreat-redis.service
+After=openthreat-postgres.service openthreat-redis.service
+
+[Container]
+ContainerName=openthreat-worker
+Image=localhost/openthreat-backend:current
+Network=openthreat.network
+IP=@SUBNET@.22
+PodmanArgs=--memory=1g --cpus=2
+EnvironmentFile=@STATE@/app.env
+# Fixed node name, so the health check doesn't depend on the hostname
+Exec=celery -A backend.celery_app worker --loglevel=info --concurrency=1 -n worker@openthreat
+HealthCmd=celery -A backend.celery_app inspect ping -d worker@openthreat --timeout 15
+HealthInterval=2m
+HealthTimeout=40s
+HealthRetries=3
+HealthStartPeriod=2m
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=openthreat.target

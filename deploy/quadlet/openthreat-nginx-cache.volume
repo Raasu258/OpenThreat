@@ -1,0 +1,4 @@
+# nginx proxy cache. Named like the volume podman-compose created, so an existing
+# installation keeps its data (Quadlet reuses an existing volume).
+[Volume]
+VolumeName=openthreat_nginx_cache

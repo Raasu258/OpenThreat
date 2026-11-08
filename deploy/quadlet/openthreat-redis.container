@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenThreat Redis
+PartOf=openthreat.target
+
+[Container]
+ContainerName=openthreat-redis
+Image=docker.io/library/redis:7-alpine
+AutoUpdate=registry
+Network=openthreat.network
+IP=@SUBNET@.11
+PodmanArgs=--network-alias=redis --memory=512m --cpus=0.5
+Volume=openthreat-redis.volume:/data
+Exec=redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1000
+HealthCmd=redis-cli ping
+HealthInterval=10s
+HealthRetries=10
+Notify=healthy
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+
+[Install]
+WantedBy=openthreat.target

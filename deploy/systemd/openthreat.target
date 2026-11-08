@@ -1,0 +1,8 @@
+# The whole OpenThreat stack. Containers are Quadlet units
+# (~/.config/containers/systemd/openthreat-*), all PartOf this target:
+#   systemctl --user start|stop|restart openthreat.target
+[Unit]
+Description=OpenThreat stack
+
+[Install]
+WantedBy=default.target

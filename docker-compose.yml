@@ -1,8 +1,11 @@
-# OpenThreat production stack (rootless Podman + podman-compose on the VPS).
+# OpenThreat stack for local development and the CI full-stack test.
 #
-# Application images are built by GitHub Actions (.github/workflows/images.yml)
-# and pulled from GHCR; deploy/deploy.sh pins OT_IMAGE_TAG to the commit
-# being deployed. To build locally instead:
+# The VPS does NOT use this file: it runs the same services as systemd
+# units (Podman Quadlet) from deploy/quadlet/ - see deploy/README.md.
+# Keep both in sync when adding services or settings.
+#
+# Images are built by GitHub Actions (.github/workflows/images.yml).
+# To build locally instead:
 #   podman build -t ghcr.io/<owner>/openthreat-backend:local -f Dockerfile.prod .
 #   podman build -t ghcr.io/<owner>/openthreat-frontend:local frontend -f frontend/Dockerfile.prod
 #   OT_IMAGE_TAG=local podman-compose up -d

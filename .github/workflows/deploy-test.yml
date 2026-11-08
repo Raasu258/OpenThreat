@@ -1,0 +1,77 @@
+# End-to-end test of the VPS deployment (deploy/*): rootless Podman +
+# Quadlet + systemd --user on a real runner. See scripts/ci/deploy-test.sh.
+name: Deploy test
+
+on:
+  pull_request:
+    branches: [main]
+    paths: &paths
+      - deploy/**
+      - nginx/**
+      - Dockerfile.prod
+      - frontend/Dockerfile.prod
+      - scripts/ci/deploy-test.sh
+      - .github/workflows/deploy-test.yml
+  push:
+    branches: [main]
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: VPS deploy (Quadlet, migration, rollback)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Same cache scopes as images.yml
+      - name: Build backend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.prod
+          load: true
+          provenance: false
+          tags: ci/openthreat-backend:test
+          cache-from: type=gha,scope=backend
+
+      - name: Build frontend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: frontend
+          file: frontend/Dockerfile.prod
+          load: true
+          provenance: false
+          tags: ci/openthreat-frontend:test
+          cache-from: type=gha,scope=frontend
+
+      - name: Rootless Podman + systemd user session
+        run: |
+          sudo apt-get install -y -q podman netavark aardvark-dns slirp4netns uidmap >/dev/null
+          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          grep -q "^$USER:" /etc/subuid || sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$USER"
+          sudo loginctl enable-linger "$USER"
+          for _ in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          podman system migrate
+          podman info --format 'podman {{.Version.Version}}, network {{.Host.NetworkBackend}}, rootless {{.Host.Security.Rootless}}'
+          systemctl --user is-system-running || true
+
+      - name: Install, deploy, rollback, crash and restart scenarios
+        env:
+          SRC_BACKEND_IMAGE: ci/openthreat-backend:test
+          SRC_FRONTEND_IMAGE: ci/openthreat-frontend:test
+        run: scripts/ci/deploy-test.sh
