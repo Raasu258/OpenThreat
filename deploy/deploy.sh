@@ -63,6 +63,10 @@ activate() {
   render_env_files
   tag_current "sha-$commit" || { log "could not pull images sha-$commit"; return 1; }
   changed="$(render_units)"
+  case " $(printf '%s ' $changed)" in
+    *" openthreat-nginx.socket "*) ensure_socket restart ;;
+    *) ensure_socket ;;
+  esac
   systemctl --user start openthreat-postgres.service openthreat-redis.service
   migrate_db || { log "migrations failed"; return 1; }
   # app units always (new images); data units only if their definition changed
@@ -126,6 +130,7 @@ apply() {
     podman tag "$LOCAL_IMG-$svc:previous" "$LOCAL_IMG-$svc:current"
   done
   render_units >/dev/null
+  ensure_socket restart
   restart_units "${APP_UNITS[@]}"
   if health_check "$HEALTH_TIMEOUT"; then
     log "rolled back to ${prev:0:12}"
@@ -153,6 +158,7 @@ rollback() {
   done
   render_env_files
   render_units >/dev/null
+  ensure_socket restart
   restart_units "${APP_UNITS[@]}"
   state_set deployed "$prev"
   rm -f "$OT_STATE/previous"
@@ -170,6 +176,7 @@ status() {
     health="$(podman inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}' "$u" 2>/dev/null || echo -)"
     printf '  %-22s %-10s %s\n' "$u" "$state" "$health"
   done
+  printf '  %-22s %s\n' openthreat-nginx.socket "$(systemctl --user is-active openthreat-nginx.socket 2>/dev/null || true)"
   printf '  timer: %s\n' "$(systemctl --user list-timers openthreat-deploy.timer --no-legend 2>/dev/null | awk '{print "next " $1" "$2" "$3}')"
 }
 

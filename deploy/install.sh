@@ -101,7 +101,8 @@ if [ -n "$(podman ps -a -q --filter "label=$COMPOSE_LABEL")" ]; then
   log "removing compose containers (volumes stay)"
   REMOVED_COMPOSE=1
   podman stop -t 90 $(podman ps -q --filter "label=$COMPOSE_LABEL") >/dev/null 2>&1 || true
-  podman rm -f $(podman ps -a -q --filter "label=$COMPOSE_LABEL") >/dev/null
+  # --depend: podman-compose links containers (depends_on) - order matters
+  podman rm -f --depend $(podman ps -a -q --filter "label=$COMPOSE_LABEL") >/dev/null
   podman volume exists openthreat_postgres_data || die "volume openthreat_postgres_data vanished?!"
 elif podman volume exists openthreat_postgres_data; then
   log "reusing existing volume openthreat_postgres_data"
@@ -113,6 +114,7 @@ tag_current "sha-$target"
 log "units -> $QUADLET_DIR, $UNIT_DIR"
 render_units >/dev/null
 systemctl --user enable openthreat.target >/dev/null
+ensure_socket restart
 
 log "starting postgres + redis"
 systemctl --user start openthreat-postgres.service openthreat-redis.service
