@@ -5,11 +5,6 @@ PartOf=openthreat.target
 After=openthreat.target
 Wants=openthreat-backend.service openthreat-frontend.service
 After=openthreat-backend.service openthreat-frontend.service
-# The public ports are opened by systemd (openthreat-nginx.socket) and handed
-# to nginx. Rootless port publishing (rootlessport) would replace every
-# client address with an internal 10.x one.
-Requires=openthreat-nginx.socket
-After=openthreat-nginx.socket
 
 [Container]
 ContainerName=openthreat-nginx
@@ -17,12 +12,10 @@ Image=docker.io/library/nginx:alpine
 AutoUpdate=registry
 Network=openthreat.network
 IP=@SUBNET@.30
-# Inherited sockets: fd 3 = HTTP, fd 4 = HTTPS (ListenStream order). nginx
-# adopts them for the listen directives with the same address.
-Environment=NGINX=3;4;
+PublishPort=@HTTP_PORT@:80
+PublishPort=@HTTPS_PORT@:443
 # nginx.conf is a template: only NGINX_PUBLIC_* is substituted at start
 Environment=NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx NGINX_ENVSUBST_FILTER=^NGINX_PUBLIC_ NGINX_PUBLIC_HTTPS_PORT=@HTTPS_PORT@
-Environment=NGINX_PUBLIC_HTTP_LISTEN=0.0.0.0:@HTTP_PORT@ NGINX_PUBLIC_HTTPS_LISTEN=0.0.0.0:@HTTPS_PORT@
 Volume=@REPO@/nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro,Z
 Volume=@REPO@/nginx/ssl:/etc/nginx/ssl:ro,Z
 Volume=openthreat-nginx-cache.volume:/var/cache/nginx

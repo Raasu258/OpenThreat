@@ -31,8 +31,6 @@ services:
       NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
       NGINX_ENVSUBST_FILTER: ^NGINX_PUBLIC_
       NGINX_PUBLIC_HTTPS_PORT: ${NGINX_HTTPS_PORT:-8443}
-      NGINX_PUBLIC_HTTP_LISTEN: "80"
-      NGINX_PUBLIC_HTTPS_LISTEN: "443"
     volumes:
       # :Z gives the files a private SELinux label for this container
       - ./nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro,Z
