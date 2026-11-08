@@ -1,263 +1,183 @@
 #!/usr/bin/env bash
-# Pull-based deploy for OpenThreat on a rootless Podman host.
+# Pull-based deploy of OpenThreat on the VPS (rootless Podman + Quadlet).
 #
-#   deploy/deploy.sh             deploy origin/main if it moved (used by the timer)
-#   deploy/deploy.sh --force     redeploy the current target even if unchanged
-#   deploy/deploy.sh --rollback  go back to the previous successful deploy
-#   deploy/deploy.sh --status    show what is deployed
+#   deploy/deploy.sh             deploy origin/main if it's new and CI published images
+#   deploy/deploy.sh --force     redeploy origin/main even if current / previously failed
+#   deploy/deploy.sh --status    what is deployed, unit and container health
+#   deploy/deploy.sh --rollback  back to the previous deploy (code + images)
 #
-# Flow: git fetch -> pull ghcr images tagged sha-<commit> (built by CI;
-# if they don't exist yet, try again next run) -> DB backup -> update
-# checkout + OT_IMAGE_TAG -> migrations -> restart -> health check ->
-# automatic rollback of code/images on failure.
-#
-# The VPS never builds anything and GitHub has no access to the VPS.
-# Everything runs as the unprivileged user that owns the stack.
-#
-# The whole script lives in main() so bash has parsed all of it before
-# `git` replaces this file during a deploy.
-
+# Run by openthreat-deploy.timer every 5 minutes. Flow for a new commit:
+#   images sha-<commit> on GHCR? (no -> CI not done, try next run)
+#   checkout -> re-exec the new deploy.sh -> pg_dump backup (verified)
+#   tag images :current (old :current -> :previous) -> render units
+#   migrations -> restart app units -> health check
+#   failed -> previous images + code, restart, mark commit failed
+# Postgres and Redis are only restarted when their unit definition changed.
 set -Eeuo pipefail
+# shellcheck source=deploy/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+cd "$OT_REPO"
 
-main() {
-  REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-  cd "$REPO_DIR"
+BRANCH=main
+FORCE=0
 
-  export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-openthreat}"
-  COMPOSE="${PODMAN_COMPOSE:-podman-compose}"
-  BRANCH="${DEPLOY_BRANCH:-main}"
-  STATE_DIR="$REPO_DIR/.deploy"
-  mkdir -p "$STATE_DIR"
+# One deploy at a time. flock -o: the lock fd is not inherited by anything we
+# start (podman/conmon would otherwise keep the lock after we exit).
+if [ -z "${OT_DEPLOY_LOCKED:-}" ]; then
+  mkdir -p "$OT_STATE"
+  # exit 75 = another deploy holds the lock (SuccessExitStatus in the unit)
+  OT_DEPLOY_LOCKED=1 exec flock -n -E 75 -o "$OT_STATE/deploy.lock" "$0" "$@"
+fi
 
-  [ -f .env ] || die ".env missing in $REPO_DIR (see .env.vps.example)"
+load_settings
 
-  REGISTRY="$(env_get OT_REGISTRY)"; REGISTRY="${REGISTRY:-ghcr.io/raasu258}"
-  HTTPS_PORT="$(env_get NGINX_HTTPS_PORT)"; HTTPS_PORT="${HTTPS_PORT:-8443}"
-  BACKUP_DIR="$(env_get DEPLOY_BACKUP_DIR)"; BACKUP_DIR="${BACKUP_DIR:-$HOME/backups/openthreat}"
-  BACKUP_KEEP="$(env_get DEPLOY_BACKUP_KEEP)"; BACKUP_KEEP="${BACKUP_KEEP:-14}"
-  NOTIFY_URL="$(env_get DEPLOY_NOTIFY_URL)"
+# Never touch a host that hasn't been migrated: a second Postgres on the
+# compose stack's data volume would corrupt it.
+if [ -n "$(podman ps -a -q --filter label=io.podman.compose.project=openthreat 2>/dev/null)" ]; then
+  die "podman-compose containers exist - run deploy/install.sh once (it migrates them)"
+fi
+case "${1:-}" in --status) ;; *)
+  [ -n "$(state_get deployed)" ] || die "not installed yet - run deploy/install.sh" ;;
+esac
 
-  # One deploy at a time (timer + manual run).
-  # The script re-runs itself under `flock -o`: the flock process holds the
-  # lock and the script does NOT get the lock fd. Holding it in the script
-  # (exec 9>lock) leaked the fd into everything it started - podman's
-  # conmon processes outlive the deploy, so the lock was never released.
-  if [ "${OT_DEPLOY_LOCKED:-}" != 1 ]; then
-    local rc=0
-    OT_DEPLOY_LOCKED=1 flock -n -E 75 -o "$STATE_DIR/lock" \
-      "$(readlink -f "${BASH_SOURCE[0]}")" "$@" || rc=$?
-    if [ "$rc" -eq 75 ]; then
-      log "another deploy is running, skipping"
-      return 0
-    fi
-    return "$rc"
-  fi
-
-  case "${1:-}" in
-    --status)   status; return 0 ;;
-    --rollback) rollback_to_previous; return $? ;;
-    --force)    FORCE=1 ;;
-    "")         FORCE=0 ;;
-    *)          die "unknown option: $1" ;;
-  esac
-
-  deploy
+restart_units() { # unit names (without .service)
+  [ $# -gt 0 ] || return 0
+  log "restarting: $*"
+  # --no-block + health_check instead of waiting per unit: a unit that never
+  # gets healthy must not hang the deploy until TimeoutStartSec.
+  systemctl --user restart --no-block "${@/%/.service}"
 }
 
-# ---------------------------------------------------------------- helpers
-
-log()  { printf '%s %s\n' "$(date -Is)" "$*"; }
-die()  { log "ERROR: $*"; exit 1; }
-
-notify() { # title, message
-  [ -n "${NOTIFY_URL:-}" ] || return 0
-  curl -fsS -m 10 -H "Title: $1" -d "$2" "$NOTIFY_URL" >/dev/null 2>&1 || true
+prune_images() {
+  local keep_cur keep_prev
+  keep_cur="sha-$(state_get deployed)"; keep_prev="sha-$(state_get previous)"
+  podman images --format '{{.Repository}}:{{.Tag}}' \
+    | grep -E "/openthreat-(backend|frontend):sha-" \
+    | grep -v -e ":$keep_cur\$" -e ":$keep_prev\$" | xargs -r podman rmi >/dev/null 2>&1 || true
+  podman image prune -f >/dev/null 2>&1 || true
 }
 
-env_get() { # KEY -> value from .env (last occurrence, surrounding quotes stripped)
-  sed -n "s/^[[:space:]]*$1=//p" .env | tail -n1 | sed -E 's/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/'
+# Activate commit $1 (code already checked out). Returns non-zero on failure.
+activate() {
+  local commit="$1" changed
+  render_env_files
+  tag_current "sha-$commit" || { log "could not pull images sha-$commit"; return 1; }
+  changed="$(render_units)"
+  systemctl --user start openthreat-postgres.service openthreat-redis.service
+  migrate_db || { log "migrations failed"; return 1; }
+  # app units always (new images); data units only if their definition changed
+  # shellcheck disable=SC2046
+  restart_units "${APP_UNITS[@]}" $(printf '%s\n' $changed | grep -xE 'openthreat-(postgres|redis)' || true)
+  health_check "$HEALTH_TIMEOUT"
 }
-
-env_set() { # KEY VALUE -> replace or append in .env (keeps file mode)
-  if grep -q "^[[:space:]]*$1=" .env; then
-    sed -i "s|^[[:space:]]*$1=.*|$1=$2|" .env
-  else
-    printf '%s=%s\n' "$1" "$2" >> .env
-  fi
-}
-
-svc_container() { # compose service -> container id
-  podman ps -q \
-    --filter "label=io.podman.compose.project=$COMPOSE_PROJECT_NAME" \
-    --filter "label=com.docker.compose.service=$1" | awk 'NR==1'  # not head: SIGPIPE + pipefail
-}
-
-state_get() { [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1" || true; }
-state_set() { printf '%s\n' "$2" > "$STATE_DIR/$1"; }
-
-images_for() { # commit -> pull both images; non-zero if any is missing
-  local tag="sha-$1" svc
-  for svc in backend frontend; do
-    podman pull -q "$REGISTRY/openthreat-$svc:$tag" >/dev/null 2>&1 || return 1
-  done
-}
-
-wait_postgres() {
-  local pg
-  for _ in $(seq 1 30); do
-    pg="$(svc_container postgres)"
-    if [ -n "$pg" ] && podman exec "$pg" sh -c 'pg_isready -q -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; then
-      return 0
-    fi
-    sleep 2
-  done
-  return 1
-}
-
-backup_db() {
-  local pg file
-  pg="$(svc_container postgres)"
-  if [ -z "$pg" ]; then
-    log "postgres not running, skipping backup"
-    return 0
-  fi
-  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
-  file="$BACKUP_DIR/openthreat-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short=12 HEAD).dump"
-  podman exec "$pg" sh -c 'pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB"' > "$file.tmp"
-  mv "$file.tmp" "$file"; chmod 600 "$file"
-  log "backup: $file ($(du -h "$file" | cut -f1))"
-  LAST_BACKUP="$file"
-  # keep the newest $BACKUP_KEEP dumps
-  ls -1t "$BACKUP_DIR"/openthreat-*.dump 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | xargs -r rm -f
-}
-
-health_check() {
-  local code_api code_web
-  for _ in $(seq 1 45); do
-    code_api="$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$HTTPS_PORT/health" || true)"
-    code_web="$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$HTTPS_PORT/" || true)"
-    if [ "$code_api" = 200 ] && [ "$code_web" = 200 ] && [ -n "$(svc_container celery-worker)" ]; then
-      log "health ok (api=$code_api web=$code_web)"
-      return 0
-    fi
-    sleep 4
-  done
-  log "health FAILED (api=$code_api web=$code_web worker=$(svc_container celery-worker))"
-  return 1
-}
-
-checkout() { # commit -> move the working tree there (VPS has no local commits)
-  local target="$1"
-  if git merge-base --is-ancestor HEAD "$target"; then
-    git merge --quiet --ff-only "$target"
-  elif git merge-base --is-ancestor "$target" HEAD && [ "$(git rev-parse HEAD)" != "$target" ]; then
-    die "local commits on the VPS that are not on origin/$BRANCH - push or drop them first"
-  else
-    # history was rewritten upstream (rebase + force-push): follow it
-    log "history diverged (force-push?), resetting; old HEAD was $(git rev-parse --short=12 HEAD)"
-    git reset --quiet --hard "$target"
-  fi
-}
-
-switch_to() { # commit -> run that commit's images + migrations
-  local commit="$1"
-  env_set OT_IMAGE_TAG "sha-$commit"
-  log "stopping stack"
-  $COMPOSE down >/dev/null 2>&1 || true
-  $COMPOSE up -d postgres redis >/dev/null
-  wait_postgres || { log "postgres did not become ready"; return 1; }
-  log "migrations"
-  $COMPOSE run --rm backend alembic upgrade head || return 1
-  $COMPOSE run --rm backend python -m backend.migrations.run_migrations || return 1
-  log "starting stack"
-  $COMPOSE up -d >/dev/null
-  health_check
-}
-
-# --------------------------------------------------------------- commands
 
 deploy() {
-  local current target short prev_commit prev_tag
+  local target current prev short
   git fetch --quiet origin "$BRANCH"
-  current="$(git rev-parse HEAD)"
-  target="$(git rev-parse "origin/$BRANCH")"
-  short="${target:0:12}"
+  target="$(git rev-parse "origin/$BRANCH")"; short="${target:0:12}"
+  current="$(state_get deployed)"
 
-  if [ "$FORCE" != 1 ] && [ "$current" = "$target" ] && [ "$(env_get OT_IMAGE_TAG)" = "sha-$target" ]; then
-    return 0   # nothing to do (silent, runs every few minutes)
+  if [ "$target" = "$current" ] && [ "$FORCE" = 0 ]; then return 0; fi
+  if [ "$target" = "$(state_get failed)" ] && [ "$FORCE" = 0 ]; then
+    log "$short failed before - skipped until a newer commit (or --force)"; return 0
+  fi
+  if ! images_exist "sha-$target"; then
+    log "images for $short not published yet (CI running or failed) - next run"; return 0
   fi
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    die "tracked files modified on the VPS - commit them to the $BRANCH branch instead: $(git status --porcelain --untracked-files=no | tr '\n' ' ')"
-  fi
-  local secret; secret="$(env_get SECRET_KEY)"
-  if [ "${#secret}" -lt 32 ]; then
-    die "SECRET_KEY in .env is missing or shorter than 32 chars - the backend refuses to start. Fix: sed -i \"s|^SECRET_KEY=.*|SECRET_KEY=\$(openssl rand -hex 32)|\" .env"
-  fi
-  if [ "$(state_get failed)" = "$target" ] && [ "$FORCE" != 1 ]; then
-    return 0   # this commit already failed and was rolled back; wait for a new one
-  fi
-  if ! images_for "$target"; then
-    log "images for $short not in $REGISTRY yet (CI still running or failed) - retrying next run"
-    return 0
+    die "tracked files modified on the VPS - commit them to $BRANCH instead: $(git status --porcelain --untracked-files=no | tr '\n' ' ')"
   fi
 
-  log "deploying $short (was ${current:0:12})"
-  # Third-party images use moving tags (nginx:alpine, postgres:16-alpine,
-  # redis:7-alpine) - refresh them so patch releases arrive with deploys.
-  $COMPOSE pull nginx postgres redis >/dev/null 2>&1 || log "warning: could not refresh nginx/postgres/redis images"
-  prev_commit="$current"
-  prev_tag="$(env_get OT_IMAGE_TAG)"
+  log "deploying $short: $(git log -1 --format=%s "$target")"
+  git checkout --quiet -B "$BRANCH" "$target"
+  # continue with the deploy.sh of the new commit
+  exec "$OT_REPO/deploy/deploy.sh" --apply "$target"
+}
+
+apply() {
+  local target="$1" prev short="${1:0:12}"
+  prev="$(state_get deployed)"
+
   LAST_BACKUP=""
-  backup_db
+  if systemctl --user is-active --quiet openthreat-postgres.service; then
+    backup_db openthreat-postgres "$short" || die "no verified backup - not deploying $short"
+  fi
 
-  checkout "$target"
-  if switch_to "$target"; then
-    state_set previous "$prev_commit $prev_tag"
-    state_set current "$target"
-    rm -f "$STATE_DIR/failed"
-    podman image prune -f >/dev/null 2>&1 || true
+  if activate "$target"; then
+    state_set deployed "$target"
+    [ -n "$prev" ] && [ "$prev" != "$target" ] && state_set previous "$prev"
+    rm -f "$OT_STATE/failed"
+    prune_images
     log "deployed $short"
     notify "OpenThreat deployed" "$short: $(git log -1 --format=%s "$target")"
     return 0
   fi
 
-  log "deploy of $short FAILED - rolling back to ${prev_commit:0:12} ($prev_tag)"
   state_set failed "$target"
-  git reset --quiet --hard "$prev_commit"
-  env_set OT_IMAGE_TAG "$prev_tag"
-  $COMPOSE down >/dev/null 2>&1 || true
-  $COMPOSE up -d >/dev/null
-  if health_check; then
-    log "rolled back to ${prev_commit:0:12}"
+  if [ -z "$prev" ]; then
+    notify "OpenThreat deploy FAILED" "$short failed and there is no previous deploy to roll back to"
+    die "deploy of $short failed; no previous deploy to roll back to"
+  fi
+  log "deploy of $short FAILED - rolling back to ${prev:0:12}"
+  git checkout --quiet -B "$BRANCH" "$prev"
+  render_env_files
+  local svc
+  for svc in backend frontend; do
+    podman tag "$LOCAL_IMG-$svc:previous" "$LOCAL_IMG-$svc:current"
+  done
+  render_units >/dev/null
+  restart_units "${APP_UNITS[@]}"
+  if health_check "$HEALTH_TIMEOUT"; then
+    log "rolled back to ${prev:0:12}"
   else
     log "rollback is unhealthy too - manual intervention needed"
   fi
-  log "NOTE: database migrations are not reverted automatically. Backup from before the deploy: ${LAST_BACKUP:-none}"
-  notify "OpenThreat deploy FAILED" "$short failed, rolled back to ${prev_commit:0:12}. Backup: ${LAST_BACKUP:-none}"
+  log "NOTE: migrations are not reverted. Backup from before the deploy: ${LAST_BACKUP:-none}"
+  notify "OpenThreat deploy FAILED" "$short rolled back to ${prev:0:12}. Backup: ${LAST_BACKUP:-none}"
   return 1
 }
 
-rollback_to_previous() {
-  local prev prev_commit prev_tag
-  prev="$(state_get previous)"
+rollback() {
+  local prev cur
+  prev="$(state_get previous)"; cur="$(state_get deployed)"
   [ -n "$prev" ] || die "no previous deploy recorded"
-  prev_commit="${prev%% *}"; prev_tag="${prev#* }"
-  log "manual rollback to ${prev_commit:0:12} ($prev_tag)"
-  backup_db
-  state_set failed "$(git rev-parse HEAD)"   # don't redeploy the current commit automatically
-  git reset --quiet --hard "$prev_commit"
-  env_set OT_IMAGE_TAG "$prev_tag"
-  $COMPOSE down >/dev/null 2>&1 || true
-  $COMPOSE up -d >/dev/null
-  health_check
+  podman image exists "$LOCAL_IMG-backend:previous" || die "no :previous images to roll back to"
+  log "manual rollback ${cur:0:12} -> ${prev:0:12}"
+  backup_db openthreat-postgres "rollback-${cur:0:12}" || die "no verified backup - not rolling back"
+  state_set failed "$cur"     # don't redeploy it automatically
+  git checkout --quiet -B "$BRANCH" "$prev"
+  local svc
+  for svc in backend frontend; do
+    podman tag "$LOCAL_IMG-$svc:current" "$LOCAL_IMG-$svc:rolledback"
+    podman tag "$LOCAL_IMG-$svc:previous" "$LOCAL_IMG-$svc:current"
+  done
+  render_env_files
+  render_units >/dev/null
+  restart_units "${APP_UNITS[@]}"
+  state_set deployed "$prev"
+  rm -f "$OT_STATE/previous"
+  health_check "$HEALTH_TIMEOUT"
 }
 
 status() {
-  log "checkout:  $(git rev-parse --short=12 HEAD) $(git log -1 --format=%s)"
-  log "image tag: $(env_get OT_IMAGE_TAG)"
-  log "previous:  $(state_get previous)"
-  [ -n "$(state_get failed)" ] && log "last failed commit (skipped until a new one arrives): $(state_get failed)"
-  podman ps --filter "label=io.podman.compose.project=$COMPOSE_PROJECT_NAME" --format '{{.Names}}\t{{.Status}}'
+  local u state health
+  log "deployed: $(state_get deployed | cut -c1-12)  $(git log -1 --format=%s "$(state_get deployed)" 2>/dev/null || true)"
+  log "origin:   $(git rev-parse --short=12 "origin/$BRANCH" 2>/dev/null || echo ?)  (git fetch to refresh)"
+  log "previous: $(state_get previous | cut -c1-12)"
+  [ -n "$(state_get failed)" ] && log "failed:   $(state_get failed | cut -c1-12) (skipped until a newer commit)"
+  for u in "${ALL_UNITS[@]}"; do
+    state="$(systemctl --user is-active "$u.service" 2>/dev/null || true)"
+    health="$(podman inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}' "$u" 2>/dev/null || echo -)"
+    printf '  %-22s %-10s %s\n' "$u" "$state" "$health"
+  done
+  printf '  timer: %s\n' "$(systemctl --user list-timers openthreat-deploy.timer --no-legend 2>/dev/null | awk '{print "next " $1" "$2" "$3}')"
 }
 
-main "$@"; exit $?
+case "${1:-}" in
+  "")          deploy ;;
+  --force)     FORCE=1; deploy ;;
+  --apply)     apply "${2:?commit}" ;;
+  --rollback)  rollback ;;
+  --status)    status ;;
+  *)           sed -n '2,8p' "$0"; exit 2 ;;
+esac

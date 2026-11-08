@@ -1,0 +1,4 @@
+# Redis persistence (cache + Celery queue). Named like the volume podman-compose created, so an existing
+# installation keeps its data (Quadlet reuses an existing volume).
+[Volume]
+VolumeName=openthreat_redis_data

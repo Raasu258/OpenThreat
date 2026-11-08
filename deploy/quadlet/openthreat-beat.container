@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenThreat Celery beat (scheduler)
+PartOf=openthreat.target
+# ordered after the target: "systemctl stop openthreat.target" waits until this is down
+After=openthreat.target
+Requires=openthreat-redis.service
+After=openthreat-redis.service openthreat-postgres.service
+
+[Container]
+ContainerName=openthreat-beat
+Image=localhost/openthreat-backend:current
+Network=openthreat.network
+IP=@SUBNET@.23
+PodmanArgs=--memory=256m --cpus=0.25
+EnvironmentFile=@STATE@/app.env
+Exec=celery -A backend.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+# beat is PID 1: if it dies, the container exits and systemd restarts it.
+# Disable the image's HTTP health check, which doesn't apply to beat.
+HealthCmd=none
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=openthreat.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenThreat web frontend (Next.js)
+PartOf=openthreat.target
+# ordered after the target: "systemctl stop openthreat.target" waits until this is down
+After=openthreat.target
+Wants=openthreat-backend.service
+After=openthreat-backend.service
+
+[Container]
+ContainerName=openthreat-frontend
+Image=localhost/openthreat-frontend:current
+Network=openthreat.network
+IP=@SUBNET@.21
+PodmanArgs=--network-alias=frontend --memory=512m --cpus=1
+Environment=NODE_ENV=production API_URL=http://backend:8001
+HealthOnFailure=kill
+Notify=healthy
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=openthreat.target

@@ -1,68 +1,144 @@
 #!/usr/bin/env bash
-# One-time setup of the pull-based deploy on the VPS.
-# Run as the (unprivileged) user that owns the Podman stack, from the repo:
+# One-time setup of OpenThreat on the VPS with rootless Podman + Quadlet.
+# Also migrates an existing podman-compose installation, keeping its data.
+#
+# As the stack user, in the repo checkout on main:
+#   git fetch origin && git checkout -B main origin/main
 #   deploy/install.sh
+#
+# What it does:
+#   1. preflight: tools, Podman version, linger, .env, TLS files, subnet
+#   2. existing compose stack: verified pg_dump (kept as *-pre-quadlet.dump),
+#      CVE count, then compose containers + old units are removed.
+#      Volumes are NOT touched - the Quadlet units reuse them by name.
+#   3. images for the checked-out commit -> units -> migrations -> start
+#   4. health check, CVE count compared, deploy timer + podman auto-update on
 set -Eeuo pipefail
+# shellcheck source=deploy/lib.sh
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+cd "$OT_REPO"
 
-REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-cd "$REPO_DIR"
+COMPOSE_LABEL=io.podman.compose.project=openthreat
+REMOVED_COMPOSE=0
+on_exit() {
+  local rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  log "install FAILED (exit $rc)."
+  if [ "$REMOVED_COMPOSE" = 1 ]; then
+    cat >&2 <<EOF
 
-say() { printf '==> %s\n' "$*"; }
-warn() { printf 'WARN: %s\n' "$*" >&2; }
+Your data is untouched (volumes are never removed). To get the old stack back:
+  systemctl --user stop openthreat.target
+  podman-compose up -d
+Backup from before the migration: ${LAST_BACKUP:-none}
+EOF
+  fi
+}
+trap on_exit EXIT
 
-[ "$(id -u)" -ne 0 ] || { echo "Run as the stack user, not root." >&2; exit 1; }
-for bin in podman podman-compose git curl flock; do
-  command -v "$bin" >/dev/null || { echo "missing: $bin" >&2; exit 1; }
+# ------------------------------------------------------------- preflight
+log "preflight"
+[ "$(id -u)" -ne 0 ] || die "run as the stack user, not root"
+for bin in podman git curl flock systemctl python3; do
+  command -v "$bin" >/dev/null || die "missing: $bin"
 done
 
-# .env sanity
-[ -f .env ] || { echo ".env missing - start from .env.vps.example" >&2; exit 1; }
-chmod 600 .env
-for key in POSTGRES_PASSWORD SECRET_KEY CSRF_SECRET_KEY; do
-  val="$(sed -n "s/^$key=//p" .env | tail -n1)"
-  [ -n "$val" ] || warn "$key is empty in .env"
-done
-secret="$(sed -n 's/^SECRET_KEY=//p' .env | tail -n1)"
-[ "${#secret}" -ge 32 ] || warn "SECRET_KEY is shorter than 32 chars - the backend will refuse to start"
-grep -q '^OT_REGISTRY=' .env || warn "OT_REGISTRY not set in .env (default ghcr.io/raasu258)"
+pv="$(podman version --format '{{.Client.Version}}')"
+case "$pv" in
+  [5-9].*|[1-9][0-9].*) ;;
+  4.[4-9]*) warn "Podman $pv: Notify=healthy needs Podman 5 - start order then relies on restarts (works, slower)" ;;
+  *) die "Podman $pv is too old for Quadlet (need >= 4.4, recommended >= 5)" ;;
+esac
+[ -x /usr/libexec/podman/quadlet ] || [ -x /usr/lib/podman/quadlet ] || die "Quadlet generator not found (package podman too old?)"
 
-# Containers keep running without an active login session
 if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != yes ]; then
-  say "enabling linger for $USER"
+  log "enabling linger (services run without a login session)"
   loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER"
 fi
+systemctl --user show-environment >/dev/null 2>&1 || die "systemd --user not reachable (log in directly as $USER, or: machinectl shell $USER@)"
 
-say "installing systemd user units to $UNIT_DIR"
-mkdir -p "$UNIT_DIR"
-for unit in openthreat.service openthreat-deploy.service openthreat-deploy.timer; do
-  sed "s|@REPO_DIR@|$REPO_DIR|g" "deploy/systemd/$unit" > "$UNIT_DIR/$unit"
-done
-systemctl --user daemon-reload
-systemctl --user enable openthreat.service
+load_settings
+render_env_files          # validates POSTGRES_PASSWORD / SECRET_KEY
+chmod 600 .env
+[ -n "$(ls -A nginx/ssl 2>/dev/null)" ] || die "nginx/ssl is empty - put the TLS certificate and key there"
+
+nets="$(podman network ls --format '{{.Name}} {{range .Subnets}}{{.Subnet}} {{end}}')"
+if awk -v s="$SUBNET.0/24" '$1 != "openthreat" { for (i = 2; i <= NF; i++) if ($i == s) found = 1 } END { exit !found }' <<<"$nets"; then
+  die "subnet $SUBNET.0/24 is used by another Podman network - set OT_SUBNET=<a.b.c> in .env"
+fi
+[ -d /var/log/journal ] || warn "journald is not persistent: 'journalctl --user' shows nothing. Fix: sudo mkdir -p /var/log/journal && sudo systemd-tmpfiles --create --prefix /var/log/journal && sudo systemctl restart systemd-journald"
+
+target="$(git rev-parse HEAD)"
+git fetch --quiet origin main || true
+[ "$target" = "$(git rev-parse origin/main 2>/dev/null)" ] || warn "checkout ${target:0:12} is not origin/main"
+images_exist "sha-$target" || die "no images for ${target:0:12} on $REGISTRY yet - wait for the Images workflow, then rerun"
+
+# ------------------------------------------------- existing compose stack
+count_before=""
+if [ -n "$(podman ps -a -q --filter "label=$COMPOSE_LABEL")" ]; then
+  log "found podman-compose stack - migrating"
+  pg="$(podman ps -q --filter "label=$COMPOSE_LABEL" --filter label=com.docker.compose.service=postgres | awk 'NR==1')"
+  [ -n "$pg" ] || die "compose postgres is not running - start it (podman-compose up -d postgres) so it can be backed up"
+  pg="$(podman inspect --format '{{.Name}}' "$pg")"
+
+  vols="$(podman inspect --format '{{range .Mounts}}{{.Name}} {{end}}' "$pg")"
+  case " $vols " in
+    *" openthreat_postgres_data "*) ;;
+    *) die "compose postgres uses volume(s) '$vols', expected openthreat_postgres_data - not migrating (tell Claude)" ;;
+  esac
+
+  backup_db "$pg" pre-quadlet || die "backup failed - nothing was changed"
+  count_before="$(db_count "$pg")"
+  log "CVEs in database before: $count_before"
+
+  for u in $(systemctl --user list-units --all --plain --no-legend 'nvd-*' 2>/dev/null | awk '{print $1}'); do
+    log "stopping $u (resumable via deploy/ot-run.sh, see README)"
+    systemctl --user stop "$u" || true
+  done
+  systemctl --user disable --now openthreat-deploy.timer openthreat.service 2>/dev/null || true
+  rm -f "$UNIT_DIR/openthreat.service"
+
+  log "removing compose containers (volumes stay)"
+  REMOVED_COMPOSE=1
+  podman stop -t 90 $(podman ps -q --filter "label=$COMPOSE_LABEL") >/dev/null 2>&1 || true
+  podman rm -f $(podman ps -a -q --filter "label=$COMPOSE_LABEL") >/dev/null
+  podman volume exists openthreat_postgres_data || die "volume openthreat_postgres_data vanished?!"
+elif podman volume exists openthreat_postgres_data; then
+  log "reusing existing volume openthreat_postgres_data"
+fi
+
+# ------------------------------------------------------------- install
+log "images sha-${target:0:12}"
+tag_current "sha-$target"
+log "units -> $QUADLET_DIR, $UNIT_DIR"
+render_units >/dev/null
+systemctl --user enable openthreat.target >/dev/null
+
+log "starting postgres + redis"
+systemctl --user start openthreat-postgres.service openthreat-redis.service
+migrate_db
+log "starting the stack"
+systemctl --user start --no-block openthreat.target
+health_check 600
+
+count_after="$(db_count openthreat-postgres)"
+log "CVEs in database now: $count_after${count_before:+ (before: $count_before)}"
+if [ -n "$count_before" ] && [ "$count_after" != "$count_before" ]; then
+  warn "CVE count changed during migration - check before deleting the backup ($LAST_BACKUP)"
+fi
+
+state_set deployed "$target"
 systemctl --user enable --now openthreat-deploy.timer
-
-if systemctl --user is-enabled podman-restart.service >/dev/null 2>&1; then
-  warn "podman-restart.service is enabled too; openthreat.service now owns the stack."
-  warn "Disable it to avoid double starts:  systemctl --user disable podman-restart.service"
-fi
-
-# Can we pull from GHCR?
-registry="$(sed -n 's/^OT_REGISTRY=//p' .env | tail -n1)"; registry="${registry:-ghcr.io/raasu258}"
-if podman pull -q "$registry/openthreat-backend:main" >/dev/null 2>&1; then
-  say "GHCR pull works ($registry)"
-else
-  warn "could not pull $registry/openthreat-backend:main."
-  warn "Either CI hasn't published yet, or the package is private:"
-  warn "  make the packages public on GitHub, or: podman login ghcr.io  (PAT with read:packages only)"
-fi
+systemctl --user enable --now podman-auto-update.timer 2>/dev/null \
+  || warn "podman-auto-update.timer not available - base images (postgres/redis/nginx) won't auto-update"
 
 cat <<EOF
 
-Done. The timer checks origin/main every 10 minutes.
+OpenThreat runs as systemd units now (deployed ${target:0:12}).
+  status        deploy/deploy.sh --status
+  deploy log    journalctl --user -u openthreat-deploy.service -f
+  stack         systemctl --user status 'openthreat-*'
+  backups       $BACKUP_DIR${LAST_BACKUP:+  (pre-migration: $(basename "$LAST_BACKUP"))}
 
-  First deploy now:   $REPO_DIR/deploy/deploy.sh --force
-  Status:             $REPO_DIR/deploy/deploy.sh --status
-  Logs:               journalctl --user -u openthreat-deploy.service -f
-  Timer:              systemctl --user list-timers openthreat-deploy.timer
+podman-compose is no longer used on this host.
 EOF
