@@ -53,7 +53,8 @@ render_env_files() {
   pw="$(env_get POSTGRES_PASSWORD)"
   [ -n "$pw" ] || die "POSTGRES_PASSWORD is empty in .env"
   case "$pw" in *[!A-Za-z0-9._~-]*)   # percent-encode for the URL
-    pw_url="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$pw")" ;;
+    # via stdin, never argv: arguments are visible to every user in ps
+    pw_url="$(printf '%s' "$pw" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')" ;;
     *) pw_url="$pw" ;;
   esac
   [ "$(env_get SECRET_KEY | wc -c)" -gt 32 ] || die "SECRET_KEY must be >= 32 chars (openssl rand -hex 32)"
