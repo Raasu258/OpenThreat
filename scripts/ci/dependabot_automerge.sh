@@ -8,8 +8,11 @@
 # after this workflow is on the default branch; anything missed (workflow
 # added late, a GitHub hiccup, a failed merge) is picked up on the next one.
 #
-#   patch / minor  -> squash-merge, then dispatch Images on the default branch
-#   major/unknown  -> label "dependabot:manual-review" + one comment
+#   patch / minor / major -> squash-merge, then dispatch Images on the default branch
+#   unknown               -> label "dependabot:manual-review" + one comment
+# At most one merge per run: every merge gets its own main build (tests +
+# full-stack test) before the next one, so a breaking update is identified
+# and auto-merge pauses (see main_result) instead of stacking more on top.
 #   label "no-automerge" opts a PR out.
 #
 # Env: GH_TOKEN, REPO (owner/name), DEFAULT_BRANCH. Needs gh, jq, python3.
@@ -69,12 +72,15 @@ process() { # pr, sha that CI verified
 
   kind="$(jq -r .body <<<"$json" | python3 "$HERE/dependabot_update_type.py")"
   case "$kind" in
-    patch|minor)
+    patch|minor|major)
       # A merge can fail if main moved and the PR now conflicts; Dependabot
       # rebases it, CI runs again and the next run/sweep merges it.
       if write_api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=squash -f sha="$sha" \
            --jq .message; then
         merged=$((merged + 1)); summary "#$pr: merged ($kind)"
+        case ",$labels," in *,dependabot:manual-review,*)
+          write_api -X DELETE "repos/$REPO/issues/$pr/labels/dependabot:manual-review" >/dev/null || true ;;
+        esac
       else
         summary "#$pr: merge failed ($kind) - retried after Dependabot rebases it"
       fi
@@ -84,7 +90,7 @@ process() { # pr, sha that CI verified
         *,dependabot:manual-review,*) ;;
         *)
           write_api "repos/$REPO/issues/$pr/labels" -f "labels[]=dependabot:manual-review" >/dev/null
-          write_api "repos/$REPO/issues/$pr/comments" -f body="CI passed, but this is a **$kind** update, so it is not merged automatically. Review the changelog, then merge by hand (the VPS deploys it after the main build)." >/dev/null
+          write_api "repos/$REPO/issues/$pr/comments" -f body="CI passed, but the update type could not be determined ($kind), so it is not merged automatically. Check it, then merge by hand (the VPS deploys it after the main build)." >/dev/null
           ;;
       esac
       summary "#$pr: left for review ($kind)"
@@ -104,6 +110,7 @@ if [ "${1:-}" = --sweep ]; then
     --jq '.[] | select(.user.login == "dependabot[bot]") | "\(.number) \(.head.sha)"')"
   while read -r pr sha; do
     [ -n "$pr" ] || continue
+    if [ "$merged" -gt 0 ]; then summary "#$pr: waits for the main build of the previous merge"; continue; fi
     result="$(ci_result "$sha")"
     case "$result" in
       success) process "$pr" "$sha" || summary "#$pr: error while processing" ;;

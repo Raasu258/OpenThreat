@@ -2,13 +2,14 @@
 #
 # Runs from the default branch (trusted code; the PR's code is never checked
 # out here) - logic in scripts/ci/dependabot_automerge.sh:
-#   patch / minor  -> squash-merge, then build + publish images on main
-#   major/unknown  -> label "dependabot:manual-review" + one comment
+#   patch / minor / major -> squash-merge (one per run), then build main
+#   unknown               -> label "dependabot:manual-review" + one comment
 # Add the label "no-automerge" to a PR to opt it out.
 #
 # Triggers:
-#   workflow_run   right after Images finishes on a Dependabot PR
-#   schedule       sweep of all open Dependabot PRs - catches runs that
+#   workflow_run   right after Images finishes on a Dependabot PR, and
+#                  after a green main build (sweep: merge the next PR)
+#   schedule       hourly sweep of all open Dependabot PRs - catches runs that
 #                  workflow_run missed (e.g. CI finished before this file
 #                  was on main, or a merge failed because main moved)
 #   manual         Actions -> Dependabot auto-merge -> Run workflow (sweep)
@@ -24,7 +25,7 @@ on:
     workflows: [Images]
     types: [completed]
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -38,9 +39,13 @@ jobs:
   automerge:
     if: >-
       github.event_name != 'workflow_run' || (
-        github.event.workflow_run.event == 'pull_request' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.actor.login == 'dependabot[bot]'
+        github.event.workflow_run.conclusion == 'success' && ((
+          github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.actor.login == 'dependabot[bot]'
+        ) || (
+          github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+          contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event)
+        ))
       )
     runs-on: ubuntu-latest
     permissions:
@@ -59,11 +64,12 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
           EVENT: ${{ github.event_name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = workflow_run ]; then
+          if [ "$EVENT" = workflow_run ] && [ "$RUN_EVENT" = pull_request ]; then
             pr="$(gh api "repos/$REPO/pulls?state=open&head=$OWNER:$HEAD_BRANCH" --jq '.[0].number // empty')"
             if [ -z "$pr" ]; then echo "no open PR for $HEAD_BRANCH"; exit 0; fi
             scripts/ci/dependabot_automerge.sh "$pr" "$HEAD_SHA"
