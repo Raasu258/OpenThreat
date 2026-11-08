@@ -62,8 +62,8 @@ render_env_files          # validates POSTGRES_PASSWORD / SECRET_KEY
 chmod 600 .env
 [ -n "$(ls -A nginx/ssl 2>/dev/null)" ] || die "nginx/ssl is empty - put the TLS certificate and key there"
 
-if podman network ls --format '{{.Name}} {{range .Subnets}}{{.Subnet}} {{end}}' \
-     | grep -v '^openthreat ' | grep -q " $SUBNET.0/24"; then
+nets="$(podman network ls --format '{{.Name}} {{range .Subnets}}{{.Subnet}} {{end}}')"
+if awk -v s="$SUBNET.0/24" '$1 != "openthreat" { for (i = 2; i <= NF; i++) if ($i == s) found = 1 } END { exit !found }' <<<"$nets"; then
   die "subnet $SUBNET.0/24 is used by another Podman network - set OT_SUBNET=<a.b.c> in .env"
 fi
 [ -d /var/log/journal ] || warn "journald is not persistent: 'journalctl --user' shows nothing. Fix: sudo mkdir -p /var/log/journal && sudo systemd-tmpfiles --create --prefix /var/log/journal && sudo systemctl restart systemd-journald"
@@ -77,7 +77,7 @@ images_exist "sha-$target" || die "no images for ${target:0:12} on $REGISTRY yet
 count_before=""
 if [ -n "$(podman ps -a -q --filter "label=$COMPOSE_LABEL")" ]; then
   log "found podman-compose stack - migrating"
-  pg="$(podman ps -q --filter "label=$COMPOSE_LABEL" --filter label=com.docker.compose.service=postgres | head -n1)"
+  pg="$(podman ps -q --filter "label=$COMPOSE_LABEL" --filter label=com.docker.compose.service=postgres | awk 'NR==1')"
   [ -n "$pg" ] || die "compose postgres is not running - start it (podman-compose up -d postgres) so it can be backed up"
   pg="$(podman inspect --format '{{.Name}}' "$pg")"
 
