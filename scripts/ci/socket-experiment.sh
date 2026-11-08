@@ -33,28 +33,28 @@ run_variant() { # name http-port https-port mode(socket|publish) extra-lines...
     for l in "$@"; do printf '%s\n' "$l"; done; } > "$Q/exp-$n.container"
   [ "$mode" = socket ] && printf '[Socket]\nListenStream=0.0.0.0:%s\nListenStream=0.0.0.0:%s\n' "$hp" "$sp" > "$U/exp-$n.socket"
 }
-run_variant publish 18201 18202 publish
-run_variant socket  18211 18212 socket
-# same, but error log at info to see where the master stops
-run_variant socketdbg 18221 18222 socket
-sed 's#^error_log .*#error_log stderr info;#' "$C/nginx.conf" > "$C/nginx-dbg.conf"
-sed -i "s#$C/nginx.conf:#$C/nginx-dbg.conf:#" "$Q/exp-socketdbg.container"
-
+# Experiment 3: which top-level directive breaks it?
+mk() { # name port-base sed-expr
+  local n="$1" b="$2"; shift 2
+  sed "$@" "$C/nginx.conf" > "$C/nginx-$n.conf"
+  run_variant "$n" "$b"1 "$b"2 socket
+  sed -i "s#$C/nginx.conf:#$C/nginx-$n.conf:#" "$Q/exp-$n.container"
+}
+mk asis     1830 -e 's#^error_log .*#error_log stderr info;#'
+mk w1       1831 -e 's#^worker_processes auto;#worker_processes 1;#'
+mk nomulti  1832 -e '/multi_accept on;/d'
+mk noepoll  1833 -e '/use epoll;/d'
+mk mutex    1834 -e 's#multi_accept on;#multi_accept on; accept_mutex on;#'
+mk nouser   1835 -e '/^user nginx;/d'
+mk w1mutex  1836 -e 's#^worker_processes auto;#worker_processes 2;#' -e 's#multi_accept on;#multi_accept on; accept_mutex on;#'
 systemctl --user daemon-reload
-systemctl --user start exp-publish.service exp-socket.socket exp-socketdbg.socket
+for n in asis w1 nomulti noepoll mutex nouser w1mutex; do systemctl --user start "exp-$n.socket"; done
 sleep 3
-try() { echo "--- $1: $(curl -sk -m 8 -o /dev/stdout -w ' [%{http_code}]' "$2" 2>&1 | tr '\n' ' ' || echo "FAILED rc=$?")"; }
-for v in "publish 18201 18202" "socket 18211 18212" "socketdbg 18221 18222"; do
+for v in "asis 1830" "w1 1831" "nomulti 1832" "noepoll 1833" "mutex 1834" "nouser 1835" "w1mutex 1836"; do
   set -- $v
-  try "$1 http"         "http://127.0.0.1:$2/x"
-  try "$1 https /health" "https://127.0.0.1:$3/health"
-  try "$1 https /"       "https://127.0.0.1:$3/"
+  echo "--- $1: http=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${2}1/x") https=$(curl -sk -m 6 -o /dev/null -w '%{http_code}' "https://127.0.0.1:${2}2/health")"
 done
-sleep 2
-for n in socket socketdbg; do
-  echo "===== $n"
-  systemctl --user status "exp-$n.service" --no-pager -n 0 | sed -n 1,4p
-  journalctl --user -u "exp-$n.service" --no-pager -n 40 | grep -v "docker-entrypoint\|podman\[" | cut -c40-260
-done
-echo "===== inside socketdbg"
-podman exec exp-socketdbg sh -c 'ls -l /proc/1/fd; cat /etc/nginx/nginx.conf | grep -n listen; ps' 2>&1 | head -30
+echo "===== asis log"
+journalctl --user -u exp-asis.service --no-pager -n 30 | grep -v "docker-entrypoint\|podman\[" | cut -c40-260
+echo "===== inside asis"
+podman exec exp-asis sh -c 'ls -l /proc/1/fd; cat /etc/nginx/nginx.conf | grep -n listen; ps' 2>&1 | head -30
