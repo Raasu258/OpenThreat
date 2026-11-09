@@ -9,10 +9,18 @@ file after it. CREATE INDEX CONCURRENTLY cannot run inside a
 transaction at all; files containing it are split into statements and
 executed one by one in autocommit mode.
 
+Applied files are recorded in sql_migrations (name + SHA-256) and skipped
+next time. Running them again on every deploy/start was not harmless:
+e.g. "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS" takes an
+ACCESS EXCLUSIVE lock even when the column exists, so it waited for every
+long-running transaction (Celery tasks) and blocked all readers meanwhile.
+A file whose content changed runs again (files are written idempotent).
+
 Run manually (exits non-zero if any file failed):
     python -m backend.migrations.run_migrations
 """
 
+import hashlib
 import logging
 import re
 import sys
@@ -105,8 +113,41 @@ def split_sql(sql: str) -> List[str]:
     ]
 
 
+_TRACKING_DDL = """
+CREATE TABLE IF NOT EXISTS sql_migrations (
+    filename   TEXT PRIMARY KEY,
+    checksum   TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+"""
+_RECORD = """
+INSERT INTO sql_migrations (filename, checksum) VALUES (%s, %s)
+ON CONFLICT (filename) DO UPDATE SET checksum = EXCLUDED.checksum, applied_at = now()
+"""
+
+
+def _checksum(sql: str) -> str:
+    return hashlib.sha256(sql.encode()).hexdigest()
+
+
+def _applied() -> dict:
+    """filename -> checksum of the files already applied."""
+    raw = engine.raw_connection()
+    try:
+        conn = raw.driver_connection
+        with conn.cursor() as cur:
+            cur.execute(_TRACKING_DDL)
+            cur.execute("SELECT filename, checksum FROM sql_migrations")
+            rows = dict(cur.fetchall())
+        conn.commit()
+        return rows
+    finally:
+        raw.close()
+
+
 def _run_file(migration_file: Path) -> None:
     migration_sql = migration_file.read_text()
+    checksum = _checksum(migration_sql)
 
     # Raw DB-API cursor without parameters: neither SQLAlchemy's ":name"
     # bind parsing nor psycopg2's "%" interpolation touches the SQL
@@ -120,6 +161,7 @@ def _run_file(migration_file: Path) -> None:
                 with dbapi_conn.cursor() as cur:
                     for statement in split_sql(migration_sql):
                         cur.execute(statement)
+                    cur.execute(_RECORD, (migration_file.name, checksum))
             finally:
                 # Don't hand an autocommit connection back to the pool
                 dbapi_conn.autocommit = False
@@ -128,6 +170,8 @@ def _run_file(migration_file: Path) -> None:
         try:
             with dbapi_conn.cursor() as cur:
                 cur.execute(migration_sql)
+                # recorded in the same transaction as the migration itself
+                cur.execute(_RECORD, (migration_file.name, checksum))
             dbapi_conn.commit()
         except Exception:
             dbapi_conn.rollback()
@@ -138,8 +182,8 @@ def _run_file(migration_file: Path) -> None:
 
 def run_migrations() -> int:
     """
-    Run all SQL migrations in the migrations directory.
-    Migrations are idempotent and safe to run multiple times.
+    Run the SQL migrations in the migrations directory that are not
+    applied yet (or whose content changed).
 
     Returns:
         Number of files that failed.
@@ -151,10 +195,18 @@ def run_migrations() -> int:
         logger.info("No migration files found")
         return 0
 
-    logger.info(f"Found {len(migration_files)} migration file(s)")
+    applied = _applied()
+    pending = [
+        f for f in migration_files
+        if applied.get(f.name) != _checksum(f.read_text())
+    ]
+    logger.info(
+        f"Found {len(migration_files)} migration file(s), "
+        f"{len(migration_files) - len(pending)} already applied"
+    )
 
     failed = 0
-    for migration_file in migration_files:
+    for migration_file in pending:
         logger.info(f"Running migration: {migration_file.name}")
         try:
             _run_file(migration_file)

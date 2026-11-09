@@ -214,10 +214,26 @@ run_app() {
     "${args[@]}" "$LOCAL_IMG-backend:current" "$@"
 }
 
+# Migrations need table locks. Long-running Celery tasks (NVD fetch, stats
+# refresh) hold locks for minutes, so worker + beat are paused; the app
+# restart afterwards starts them again. A short lock_timeout with retries
+# instead of waiting: a migration queued for an exclusive lock blocks every
+# new reader of that table, i.e. the site, for as long as it waits.
+# (SQL files that are already applied are skipped - see run_migrations.py.)
 migrate_db() {
-  log "migrations"
-  run_app -- alembic upgrade head || return 1
-  run_app -- python -m backend.migrations.run_migrations || return 1
+  local try
+  log "migrations (worker + beat paused)"
+  systemctl --user stop openthreat-worker.service openthreat-beat.service 2>/dev/null || true
+  for try in 1 2 3 4 5; do
+    if run_app -e PGOPTIONS="-c lock_timeout=10s" -- alembic upgrade head \
+       && run_app -e PGOPTIONS="-c lock_timeout=10s" -- python -m backend.migrations.run_migrations; then
+      return 0
+    fi
+    log "migrations failed (attempt $try/5) - sessions in the database:"
+    podman exec openthreat-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select pid, state, wait_event_type, now()-xact_start as age, left(query,70) as query from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid() order by xact_start"' 2>&1 | sed 's/^/  /' || true
+    [ "$try" -lt 5 ] && sleep 15
+  done
+  return 1
 }
 
 # ---------------------------------------------------------------- health
