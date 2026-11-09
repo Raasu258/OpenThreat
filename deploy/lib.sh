@@ -214,10 +214,20 @@ run_app() {
     "${args[@]}" "$LOCAL_IMG-backend:current" "$@"
 }
 
+# Migrations need table locks. A long-running Celery task (NVD fetch, stats
+# refresh) holds locks for minutes, so worker + beat are stopped first; the
+# restart after the migration starts them again. lock_timeout turns a
+# remaining blocker into a clear failure (-> rollback) instead of a hang.
 migrate_db() {
-  log "migrations"
-  run_app -- alembic upgrade head || return 1
-  run_app -- python -m backend.migrations.run_migrations || return 1
+  log "migrations (worker + beat paused)"
+  systemctl --user stop openthreat-worker.service openthreat-beat.service 2>/dev/null || true
+  if run_app -e PGOPTIONS="-c lock_timeout=120s" -- alembic upgrade head \
+     && run_app -e PGOPTIONS="-c lock_timeout=120s" -- python -m backend.migrations.run_migrations; then
+    return 0
+  fi
+  log "migrations failed - sessions in the database:"
+  podman exec openthreat-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select pid, state, wait_event_type, now()-xact_start as age, left(query,70) as query from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid() order by xact_start"' 2>&1 | sed 's/^/  /' || true
+  return 1
 }
 
 # ---------------------------------------------------------------- health
