@@ -1,25 +1,25 @@
 # Core dependencies
 bleach==6.4.0
-annotated-types==0.7.0
+annotated-types==0.8.0
 certifi==2026.10.23
-charset-normalizer==3.4.3
+charset-normalizer==3.5.2
 idna==3.20
-pydantic==2.11.9
-pydantic_core==2.33.2
+pydantic==2.14.3
+pydantic_core==2.50.4
 requests==2.34.2
-typing-inspection==0.4.2
-typing_extensions==4.15.0
+typing-inspection==0.4.5
+typing_extensions==4.16.0
 urllib3==2.8.0
 
 # Database
-sqlalchemy==2.0.36
-psycopg2-binary==2.9.10
-alembic==1.14.0
+sqlalchemy==2.1.8
+psycopg2-binary==2.9.13
+alembic==1.20.1
 
 # API Framework
-fastapi==0.162.0
+fastapi==0.162.4
 starlette==1.10.0
-uvicorn[standard]==0.34.0
+uvicorn[standard]==0.54.0
 
 # Security
 fastapi-csrf-protect==0.3.4
@@ -33,8 +33,8 @@ bcrypt==4.1.2
 email-validator==2.3.0
 
 # Background tasks
-celery==5.4.0
-kombu==5.4.2
+celery==5.7.0
+kombu==5.7.0
 packaging==25.0
 redis==5.2.1
 
@@ -43,10 +43,10 @@ python-dotenv==1.2.4
 python-dateutil==4.0.0
 
 # LLM Integration
-ollama==0.4.4
+ollama==0.6.3
 
 # Monitoring
-prometheus-client==0.19.0
+prometheus-client==0.26.0
 psutil==5.9.6
 
 # Analytics
