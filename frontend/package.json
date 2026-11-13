@@ -23,7 +23,7 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-dropzone": "^20.2.0",
-    "recharts": "^2.13.3",
+    "recharts": "^3.10.1",
     "tailwind-merge": "^2.5.4",
     "tailwindcss-animate": "^1.0.7",
     "typescript": "^7.0.2"
