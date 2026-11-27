@@ -29,7 +29,7 @@ itsdangerous==2.2.0
 passlib[bcrypt]==1.7.4
 PyJWT==2.15.1
 python-multipart==0.0.33
-bcrypt==4.1.2
+bcrypt==5.0.0
 email-validator==2.3.0
 
 # Background tasks
